@@ -142,8 +142,8 @@ Add-Type @"
     }
 "@
 
-$global:ArcaneVersion = "1.0.4"
-$global:ArcaneProtocolVersion = "5.0.1"
+$global:ArcaneVersion = "1.0.5"
+$global:ArcaneProtocolVersion = "5.0.2"
 
 $global:HostSyncHash = [HashTable]::Synchronized(@{
     host = $host
@@ -519,6 +519,46 @@ function Resolve-AuthenticationChallenge
 }
 
 $global:DesktopStreamScriptBlock = {     
+
+    function Update-ScreensInformation()
+    {
+        <#
+            .SYNOPSIS
+                Update screens information (force update).
+
+            .DESCRIPTION
+                (
+                    PowerShell <= 5.1 -> Confirmed
+                    PowerShell >= 6.0 <= 7.0 -> Untested
+                    PowerShell >= 7.0 -> Seems to be fixed
+                )
+                It appears that a long-standing bug (PS < 7.0) affects the display resolution and screen count updates.
+                Specifically, display information seems to be cached and is not refreshed until a new PowerShell session
+                is started. This issue can be quite inconvenient. One potential solution would be to reimplement the
+                display management logic using the Windows API directly.
+
+                Given that the goal is to leverage PowerShell as much as possible, I've opted for a workaround that
+                involves patching the internal state of the Screen class. By setting the screens field to null in memory,
+                the next access to display information will force a refresh and provide updated screen data. This method,
+                while somewhat "hacky", allows us to avoid extensive changes and keep the solution within the PowerShell 
+                environment.
+        #>
+        try
+        {
+            # PowerShell >= 7.0, issue seems to be fixed
+            if ($PSVersionTable.PSVersion.Major -ge 7)
+            {
+                return
+            }
+
+            # Patch memory to force screen information to update (cache killer)
+            ([System.Windows.Forms.Screen].GetField(
+                    "screens", 
+                    [System.Reflection.BindingFlags]::Static -bor [System.Reflection.BindingFlags]::NonPublic
+            )).SetValue($null, $null)
+        } catch {}
+    }
+
     function Get-ScreenList()
     {
         <#
@@ -530,6 +570,8 @@ $global:DesktopStreamScriptBlock = {
 
         #>
         $result = @()
+
+        Update-ScreensInformation
 
         $screens = ([System.Windows.Forms.Screen]::AllScreens | Sort-Object -Property Primary -Descending)
 
@@ -642,6 +684,8 @@ $global:DesktopStreamScriptBlock = {
 
         if ($viewerExpectation.PSobject.Properties.name -contains "ScreenName")
         {        
+            Update-ScreensInformation
+
             $screen = [System.Windows.Forms.Screen]::AllScreens | Where-Object -FilterScript { 
                 $_.DeviceName -eq $viewerExpectation.ScreenName 
             }
