@@ -16,7 +16,87 @@
         Version 2.0, January 2004
         http://www.apache.org/licenses/
 
+    .Disclaimer
+        This script is provided "as is", without warranty of any kind, express or
+        implied, including but not limited to the warranties of merchantability,
+        fitness for a particular purpose and noninfringement. In no event shall the
+        authors or copyright holders be liable for any claim, damages or other
+        liability, whether in an action of contract, tort or otherwise, arising
+        from, out of or in connection with the software or the use or other dealings
+        in the software.
+
+    .Notice
+        Writing the entire code in a single PowerShell script is wished, 
+        allowing it to function both as a module or a standalone script.
+
 -------------------------------------------------------------------------------#>
+
+# ----------------------------------------------------------------------------- #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+#  Global Variables                                                             #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+# ----------------------------------------------------------------------------- #
+
+$global:ArcaneVersion = "1.0.5"
+$global:ArcaneProtocolVersion = "5.0.2"
+
+$global:HostSyncHash = [HashTable]::Synchronized(@{
+    host = $host
+    ClipboardText = (Get-Clipboard -Raw)
+})
+
+# ----------------------------------------------------------------------------- #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+#  Enums Definitions                                                            #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+# ----------------------------------------------------------------------------- #
+
+enum ClipboardMode {
+    Disabled = 1
+    Receive = 2
+    Send = 3
+    Both = 4
+}
+
+enum ProtocolCommand {
+    Success = 1
+    Fail = 2
+    RequestSession = 3
+    AttachToSession = 4
+    BadRequest = 5
+    ResourceFound = 6
+    ResourceNotFound = 7
+}
+
+enum WorkerKind {
+    Desktop = 1
+    Events = 2
+}
+
+enum LogKind {
+    Information
+    Warning
+    Success
+    Error
+}
+
+# ----------------------------------------------------------------------------- #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+#  Windows API Definitions                                                      #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+# ----------------------------------------------------------------------------- #
 
 Add-Type -Assembly System.Windows.Forms
 
@@ -184,382 +264,308 @@ Add-Type @"
     }
 "@
 
-$global:ArcaneVersion = "1.0.5"
-$global:ArcaneProtocolVersion = "5.0.2"
+# ----------------------------------------------------------------------------- #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+#  Script Blocks                                                                #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+# ----------------------------------------------------------------------------- #
 
-$global:HostSyncHash = [HashTable]::Synchronized(@{
-    host = $host
-    ClipboardText = (Get-Clipboard -Raw)
-})
-
-enum ClipboardMode {
-    Disabled = 1
-    Receive = 2
-    Send = 3
-    Both = 4
+$global:WinAPI_Const_ScriptBlock = {
+    $GENERIC_ALL = 0x10000000
 }
 
-enum ProtocolCommand {
-    Success = 1
-    Fail = 2
-    RequestSession = 3
-    AttachToSession = 4
-    BadRequest = 5
-    ResourceFound = 6
-    ResourceNotFound = 7
-}
+# -------------------------------------------------------------------------------
 
-enum WorkerKind {
-    Desktop = 1
-    Events = 2
-}
-
-enum LogKind {
-    Information
-    Warning
-    Success
-    Error
-}
-
-enum BlockSize {
-    Size32 = 32
-    Size64 = 64
-    Size96 = 96
-    Size128 = 128
-    Size256 = 256
-    Size512 = 512
-}
-
-enum PacketSize {
-    Size1024 = 1024
-    Size2048 = 2048
-    Size4096 = 4096
-    Size8192 = 8192
-    Size9216 = 9216
-    Size12288 = 12288
-    Size16384 = 16384
-}
-
-function Write-Banner
-{
-    <#
-        .SYNOPSIS
-            Output cool information about current PowerShell module to terminal.
-    #>
-
-    Write-Host ""
-    Write-Host "Arcane Server " -NoNewLine
-    Write-Host $global:ArcaneVersion -ForegroundColor Cyan
-    Write-Host "Jean-Pierre LESUEUR (" -NoNewLine
-    Write-Host "@DarkCoderSc" -NoNewLine -ForegroundColor Green
-    Write-Host ") " -NoNewLine
-    Write-Host ""
-    Write-Host "License: Apache License (Version 2.0, January 2004)"
-    Write-Host ""
-}
-
-function Write-Log
-{
-    <#
-        .SYNOPSIS
-            Output a log message to terminal with associated "icon".
-
-        .PARAMETER Message
-            Type: String
-            Default: None
-
-            Description: The message to write to terminal.
-
-        .PARAMETER LogKind
-            Type: LogKind Enum
-            Default: Information
-
-            Description: Define the logger "icon" kind.
-    #>
-    param(
-        [Parameter(Mandatory=$True)]
-        [string] $Message,
-
-        [LogKind] $LogKind = [LogKind]::Information
-    )
-
-    switch ($LogKind)
+$global:WinAPIException_Class_ScriptBlock = {
+    class WinAPIException: System.Exception
     {
-        ([LogKind]::Warning)
-        {
-            $icon = "!!"
-            $color = [System.ConsoleColor]::Yellow
+        WinAPIException([string] $ApiName) : base (
+            [string]::Format(
+                "WinApi Exception -> {0}, LastError: {1}",
+                $ApiName,
+                [System.Runtime.InteropServices.Marshal]::GetLastWin32Error().ToString()
+            )
+        )
+        {}
+    }
+}
 
-            break
+# -------------------------------------------------------------------------------
+
+$global:GetUserObjectInformation_Func_ScriptBlock = {
+    function Get-UserObjectInformationName
+    {
+        <#
+            .SYNOPSIS
+                Retrieves the name of the specified object.
+
+            .PARAMETER hObj
+                A handle to the object.
+        #>
+        param (
+            [Parameter(Mandatory = $true)]
+            [IntPtr]$hObj
+        )
+
+        $pvInfo = [IntPtr]::Zero
+        try
+        {
+            $lpnLengthNeeded = [UInt32]0
+
+            $UOI_NAME = 0x2
+            $null = [User32]::GetUserObjectInformation(
+                $hObj,
+                $UOI_NAME,
+                [IntPtr]::Zero,
+                0,
+                [ref]$lpnLengthNeeded
+            )
+
+            if ($lpnLengthNeeded -eq 0)
+            {
+                throw [WinAPIException]::New("GetUserObjectInformation(1)")
+            }
+
+            $pvInfo = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($lpnLengthNeeded)
+
+            $b = [User32]::GetUserObjectInformation(
+                $desktop,
+                $UOI_NAME,
+                $pvInfo,
+                $lpnLengthNeeded,
+                [ref]$lpnLengthNeeded
+            )
+
+            if ($b -eq $false)
+            {
+                throw [WinAPIException]::New("GetUserObjectInformation(2)")
+            }
+
+            return [System.Runtime.InteropServices.Marshal]::PtrToStringUni($pvInfo)
+        }
+        finally
+        {
+            if ($pvInfo -ne [IntPtr]::Zero)
+            {
+                [System.Runtime.InteropServices.Marshal]::FreeHGlobal($pvInfo)
+            }
         }
 
-        ([LogKind]::Success)
-        {
-            $icon = "OK"
-            $color = [System.ConsoleColor]::Green
+        return $objectName
+    }
+}
 
-            break
+# -------------------------------------------------------------------------------
+
+$global:GetInputDesktopName_Func_ScriptBlock = {
+    function Get-InputDesktopName
+    {
+        <#
+            .SYNOPSIS
+                Retrieves the name of the input desktop (Desktop that receive input).
+        #>
+        $desktop = [IntPtr]::Zero
+        try
+        {
+            $desktop = [User32]::OpenInputDesktop(0, $false, $GENERIC_ALL)
+            if ($desktop -eq [IntPtr]::Zero)
+            {
+                throw [WinAPIException]::New("OpenInputDesktop")
+            }
+
+            return Get-UserObjectInformationName -hObj $desktop
+        }
+        finally
+        {
+            if ($desktop -ne [IntPtr]::Zero)
+            {
+                $null = [User32]::CloseDesktop($desktop)
+            }
+        }
+    }
+}
+
+# -------------------------------------------------------------------------------
+
+$global:GetCurrentThreadDesktopName_Func_ScriptBlock = {
+    function Get-CurrentThreadDesktopName
+    {
+        <#
+            .SYNOPSIS
+                Retrieves the name of the desktop associated with the current thread.
+        #>
+        $desktop = [User32]::GetThreadDesktop([Kernel32]::GetCurrentThreadId())
+        if ($desktop -eq [IntPtr]::Zero)
+        {
+            throw [WinAPIException]::New("GetThreadDesktop")
+        }
+        try
+        {
+            return Get-UserObjectInformationName -hObj $desktop
+        }
+        finally
+        {
+            $null = [User32]::CloseDesktop($desktop)
+        }
+    }
+}
+
+# -------------------------------------------------------------------------------
+
+$global:UpdateCurrentThreadDesktop_Func_ScriptBlock = {
+    function Update-CurrentThreadDesktop
+    {
+        <#
+            .SYNOPSIS
+                Updates the desktop associated with the current thread.
+
+            .PARAMETER DesktopName
+                The name of the desktop to be associated with the current thread.
+        #>
+        param(
+            [Parameter(Mandatory=$True)]
+            [string] $DesktopName
+        )
+
+        $desktop = [User32]::OpenDesktop($DesktopName, 0, $true, $GENERIC_ALL)
+        if ($desktop -eq [IntPtr]::Zero)
+        {
+            throw [WinAPIException]::New("OpenDesktop")
+        }    
+        try
+        {
+            if (-not [User32]::SetThreadDesktop($desktop))
+            {
+                throw [WinAPIException]::New("SetThreadDesktop")
+            }
+        }
+        finally
+        {
+            $null = [User32]::CloseDesktop($desktop)
+        }
+    }
+}
+
+# -------------------------------------------------------------------------------
+
+$global:UpdateCurrentThreadDesktopWithInputDesktop_Func_ScriptBlock = {
+    function Update-CurrentThreadDesktopWidthInputDesktop()
+    {
+        <#
+            .SYNOPSIS
+                Updates the desktop associated with the current thread if input desktop changed.
+
+            .DESCRIPTION
+                Exceptions are catched and ignored.
+        #>
+        try
+        {
+            $currentThreadDesktopName = Get-CurrentThreadDesktopName
+            $inputDesktopName = Get-InputDesktopName
+
+            if ($currentThreadDesktopName -ne "" -and $inputDesktopName -ne "" -and $currentThreadDesktopName -ne $inputDesktopName)
+            {
+                $desktop = [User32]::OpenInputDesktop(0, $true,  $GENERIC_ALL)
+                if ($desktop -eq [IntPtr]::Zero)
+                {
+                    throw [WinAPIException]::New("OpenInputDesktop")
+                }
+                try
+                {
+                    return [User32]::SetThreadDesktop($desktop)
+                }
+                finally {
+                    $null = [User32]::CloseDesktop($desktop)
+                }
+            }
+        }
+        catch {}
+        return $false
+    }
+}
+
+# -------------------------------------------------------------------------------
+
+$global:NewRunSpace_Func_ScriptBlock = {
+    function New-RunSpace
+    {
+        <#
+            .SYNOPSIS
+                Create a new PowerShell Runspace.
+
+            .DESCRIPTION
+                Notice: the $host variable is used for debugging purpose to write on caller PowerShell
+                Terminal.
+
+            .PARAMETER ScriptBlocks
+                Type: ScriptBlock[]
+                Default: None
+                Description: Instructions to execute in new runspace. Runspace can be composed of one or
+                multiple script blocks.
+
+            .PARAMETER Params
+                Type: Hashtable
+                Default: None
+                Description: Hashtable containing parameters to pass to the runspace.
+
+            .PARAMETER RunspaceApartmentState
+                Type: String
+                Default: "STA"
+                Description: The apartment state of the runspace (Single, Multi).
+        #>
+        param(
+            [Parameter(Mandatory=$True)]
+            [ScriptBlock[]] $ScriptBlocks,
+
+            [Hashtable]$Params = @{},
+
+            [ValidateSet("STA", "MTA")]
+            [string]$RunspaceApartmentState = "STA"
+        )
+
+        $runspace = [RunspaceFactory]::CreateRunspace()
+        $runspace.ThreadOptions = "UseNewThread"
+        $runspace.ApartmentState = $RunspaceApartmentState
+        $runspace.Open()
+
+        if ($Params.Count -gt 0)
+        {
+            foreach ($key in $Params.Keys)
+            {
+                $runspace.SessionStateProxy.SetVariable(
+                    $key,
+                    $Params[$key]
+                )
+            }
         }
 
-        ([LogKind]::Error)
-        {
-            $icon = "KO"
-            $color = [System.ConsoleColor]::Red
+        $powershell = [PowerShell]::Create()
 
-            break
+        foreach ($scriptBlock in $ScriptBlocks)
+        {        
+            $null = $powershell.AddScript($scriptBlock)
         }
 
-        default
-        {
-            $color = [System.ConsoleColor]::Cyan
-            $icon = "i"
+        $powershell.Runspace = $runspace
+
+        $asyncResult = $powershell.BeginInvoke()
+
+        return New-Object PSCustomObject -Property @{
+            Runspace = $runspace
+            PowerShell = $powershell
+            AsyncResult = $asyncResult
         }
     }
-
-    Write-Host "[ " -NoNewLine
-    Write-Host $icon -ForegroundColor $color -NoNewLine
-    Write-Host " ] $Message"
 }
+. $NewRunSpace_Func_ScriptBlock
 
-function Write-OperationSuccessState
-{
-    param(
-        [Parameter(Mandatory=$True)]
-        $Result,
-
-        [Parameter(Mandatory=$True)]
-        $Message
-    )
-
-    if ($Result)
-    {
-        $kind = [LogKind]::Success
-    }
-    else
-    {
-        $kind = [LogKind]::Error
-    }
-
-    Write-Log -Message $Message -LogKind $kind
-}
-
-function Invoke-PreventSleepMode
-{
-    <#
-        .SYNOPSIS
-            Prevent computer to enter sleep mode while server is running.
-
-        .DESCRIPTION
-            Function returns thread execution state old flags value. You can use this old flags
-            to restore thread execution to its original state.
-    #>
-
-    $ES_AWAYMODE_REQUIRED = [uint32]"0x00000040"
-    $ES_CONTINUOUS = [uint32]"0x80000000"
-    $ES_SYSTEM_REQUIRED = [uint32]"0x00000001"
-
-    return [Kernel32]::SetThreadExecutionState(
-        $ES_CONTINUOUS -bor
-        $ES_SYSTEM_REQUIRED -bor
-        $ES_AWAYMODE_REQUIRED
-    )
-}
-
-function Update-ThreadExecutionState
-{
-    <#
-        .SYNOPSIS
-            Update current thread execution state flags.
-
-        .PARAMETER Flags
-            Execution state flags.
-    #>
-    param(
-        [Parameter(Mandatory=$True)]
-        $Flags
-    )
-
-    return [Kernel32]::SetThreadExecutionState($Flags) -ne 0
-}
-
-function Get-PlainTextPassword
-{
-    <#
-        .SYNOPSIS
-            Retrieve the plain-text version of a secure string.
-
-        .PARAMETER SecurePassword
-            The SecureString object to be reversed.
-
-    #>
-    param(
-        [Parameter(Mandatory=$True)]
-        [SecureString] $SecurePassword
-    )
-
-    $BSTR = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePassword)
-    try
-    {
-        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($BSTR)
-    }
-    finally
-    {
-        [Runtime.InteropServices.Marshal]::FreeBSTR($BSTR)
-    }
-}
-
-function Test-PasswordComplexity
-{
-    <#
-        .SYNOPSIS
-            Check if password is sufficiently complex.
-
-        .DESCRIPTION
-            To return True, Password must follow bellow complexity rules:
-                * Minimum 12 Characters.
-                * One of following symbols: "!@#%^&*_".
-                * At least of lower case character.
-                * At least of upper case character.
-
-        .PARAMETER SecurePasswordCandidate
-            Type: SecureString
-            Default: None
-            Description: Secure String object containing the password to test.
-    #>
-    param (
-        [Parameter(Mandatory=$True)]
-        [SecureString] $SecurePasswordCandidate
-    )
-
-    $complexityRules = "(?=^.{12,}$)(?=.*[!@#%^&*_]+)(?=.*[a-z])(?=.*[A-Z]).*$"
-
-    return (Get-PlainTextPassword -SecurePassword $SecurePasswordCandidate) -match $complexityRules
-}
-
-function New-RandomPassword
-{
-    <#
-        .SYNOPSIS
-            Generate a new secure password.
-
-        .DESCRIPTION
-            Generate new password candidates until one candidate match complexity rules.
-            Generally only one iteration is enough but in some rare case it could be one or two more.
-    #>
-    do
-    {
-        $authorizedChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#%^&*_"
-
-        $candidate = -join ((1..18) | ForEach-Object { Get-Random -Input $authorizedChars.ToCharArray() })
-
-        $secureCandidate = ConvertTo-SecureString -String $candidate -AsPlainText -Force
-    } until (Test-PasswordComplexity -SecurePasswordCandidate $secureCandidate)
-
-    $candidate = $null
-
-    return $secureCandidate
-}
-
-function Get-DefaultCertificateOrCreate
-{
-    <#
-        .SYNOPSIS
-            Get default certificate from user store or create a new one.
-    #>
-    param (
-        [string] $SubjectName = "Arcane.Server",
-        [string] $StorePath = "cert:\CurrentUser\My",
-        [int] $CertExpirationInDays = 365
-    )
-
-    $certificates = Get-ChildItem -Path $StorePath | Where-Object { $_.Subject -eq "CN=" + $SubjectName }
-
-    if (-not $certificates)
-    {
-        return New-SelfSignedCertificate -CertStoreLocation $StorePath `
-                -NotAfter (Get-Date).AddDays($CertExpirationInDays) `
-                -Subject $SubjectName
-    }
-    else
-    {
-        return $certificates[0]
-    }
-}
-
-function Get-SHA512FromString
-{
-    <#
-        .SYNOPSIS
-            Return the SHA512 value from string.
-
-        .PARAMETER String
-            Type: String
-            Default : None
-            Description: A String to hash.
-
-        .EXAMPLE
-            Get-SHA512FromString -String "Hello, World"
-    #>
-    param (
-        [Parameter(Mandatory=$True)]
-        [string] $String
-    )
-
-    $buffer = [IO.MemoryStream]::new([byte[]][char[]]$String)
-
-    return (Get-FileHash -InputStream $buffer -Algorithm SHA512).Hash
-}
-
-function Resolve-AuthenticationChallenge
-{
-    <#
-        .SYNOPSIS
-            Algorithm to solve the server challenge during password authentication.
-
-        .DESCRIPTION
-            Server needs to resolve the challenge and keep the solution in memory before sending
-            the candidate to remote peer.
-
-        .PARAMETER Password
-            Type: SecureString
-            Default: None
-            Description: Secure String object containing the password for resolving challenge.
-
-        .PARAMETER Candidate
-            Type: String
-            Default: None
-            Description:
-                Random string used to solve the challenge. This string is public and is set across network by server.
-                Each time a new connection is requested to server, a new candidate is generated.
-
-        .EXAMPLE
-            Resolve-AuthenticationChallenge -Password "s3cr3t!" -Candidate "rKcjdh154@]=Ldc"
-    #>
-    param (
-       [Parameter(Mandatory=$True)]
-       [SecureString] $SecurePassword,
-
-       [Parameter(Mandatory=$True)]
-       [string] $Candidate
-    )
-
-    $pbkdf2 = New-Object System.Security.Cryptography.Rfc2898DeriveBytes(
-        (Get-PlainTextPassword -SecurePassword $SecurePassword),
-        [Text.Encoding]::UTF8.GetBytes($Candidate),
-        1000,
-        [System.Security.Cryptography.HashAlgorithmName]::SHA512
-    )
-    try
-    {
-        return -join ($pbkdf2.GetBytes(64) | ForEach-Object { "{0:X2}" -f $_ })
-    }
-    finally {
-        $pbkdf2.Dispose()
-    }
-}
+# -------------------------------------------------------------------------------
 
 $global:DesktopStreamScriptBlock = {
-
     function Update-ScreensInformation
     {
         <#
@@ -706,11 +712,11 @@ $global:DesktopStreamScriptBlock = {
         $screens = New-Object PSCustomObject -Property @{
             List = (Get-ScreenObjectList)
         }
-        $Param.Client.WriteJson($screens)
+        $Client.WriteJson($screens)
 
         $screen = $null
 
-        $viewerExpectation = $Param.Client.ReadLine() | ConvertFrom-Json
+        $viewerExpectation = $Client.ReadLine() | ConvertFrom-Json
 
         if ($viewerExpectation.PSobject.Properties.name -contains "ScreenName")
         {
@@ -765,7 +771,7 @@ $global:DesktopStreamScriptBlock = {
         # This is required to capture secure desktop (Winlogon)
         $logonUIAccess = [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
 
-        while ($Param.SafeHash.SessionActive)
+        while ($SafeHash.SessionActive)
         {
             if ($collapsed)
             {
@@ -901,11 +907,11 @@ $global:DesktopStreamScriptBlock = {
                 $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
                 #>
 
-                while ($Param.SafeHash.SessionActive)
+                while ($SafeHash.SessionActive)
                 {
                     if ($logonUIAccess)
                     {
-                        $updated = Update-CurrentThreadDesktop
+                        $updated = Update-CurrentThreadDesktopWidthInputDesktop
                         if ($updated)
                         {
                             # Respawn a new desktop mirror (Winlogon or Default)
@@ -932,10 +938,10 @@ $global:DesktopStreamScriptBlock = {
                         # This is a way to tell the viewer that the screen has been updated and receive new screen information.
                         [System.Runtime.InteropServices.Marshal]::WriteByte($struct, 0xc, 0x1)
 
-                        $Param.Client.SSLStream.Write($struct , 0, $struct.Length)
+                        $Client.SSLStream.Write($struct , 0, $struct.Length)
 
                         # Send new screen information to the viewer
-                        $Param.Client.WriteJson((ConvertTo-ScreenObject -screen $screen))
+                        $Client.WriteJson((ConvertTo-ScreenObject -screen $screen))
 
                         # Respawn a new desktop mirror
                         break
@@ -1083,7 +1089,7 @@ $global:DesktopStreamScriptBlock = {
                                 [System.Runtime.InteropServices.Marshal]::WriteInt32($struct, 0x8, $dirtyRect.Top)
                                 [System.Runtime.InteropServices.Marshal]::WriteByte($struct, 0xc, 0x0)
 
-                                $Param.Client.SSLStream.Write($struct , 0, $struct.Length)
+                                $Client.SSLStream.Write($struct , 0, $struct.Length)
 
                                 $binaryReader = New-Object System.IO.BinaryReader($desktopStream)
                                 do
@@ -1094,7 +1100,7 @@ $global:DesktopStreamScriptBlock = {
                                         $bufferSize = $packetSize
                                     }
 
-                                    $Param.Client.SSLStream.Write($binaryReader.ReadBytes($bufferSize), 0, $bufferSize)
+                                    $Client.SSLStream.Write($binaryReader.ReadBytes($bufferSize), 0, $bufferSize)
                                 } until ($desktopStream.Position -eq $desktopStream.Length)
                             }
                             catch
@@ -1191,6 +1197,8 @@ $global:DesktopStreamScriptBlock = {
     catch { }
 }
 
+# -------------------------------------------------------------------------------
+
 $global:IngressEventScriptBlock = {
     enum MouseFlags {
         MOUSEEVENTF_ABSOLUTE = 0x8000
@@ -1254,7 +1262,7 @@ $global:IngressEventScriptBlock = {
     {
         try
         {
-            $jsonEvent = $Param.Reader.ReadLine()
+            $jsonEvent = $Reader.ReadLine()
         }
         catch
         {
@@ -1277,7 +1285,7 @@ $global:IngressEventScriptBlock = {
             # Keyboard Input Simulation
             ([InputEvent]::Keyboard)
             {
-                if ($Param.ViewOnly)
+                if ($ViewOnly)
                 { continue }
 
                 if (-not ($aEvent.PSobject.Properties.name -match "Keys"))
@@ -1291,7 +1299,7 @@ $global:IngressEventScriptBlock = {
             # Mouse Move & Click Simulation
             ([InputEvent]::MouseClickMove)
             {
-                if ($Param.ViewOnly)
+                if ($ViewOnly)
                 { continue }
 
                 if (-not ($aEvent.PSobject.Properties.name -match "Type"))
@@ -1349,7 +1357,7 @@ $global:IngressEventScriptBlock = {
                     # Mouse Move
                     ([MouseState]::Move)
                     {
-                        if ($Param.ViewOnly)
+                        if ($ViewOnly)
                         { continue }
 
                         #[User32]::SetCursorPos($aEvent.X, $aEvent.Y)
@@ -1364,7 +1372,7 @@ $global:IngressEventScriptBlock = {
 
             # Mouse Wheel Simulation
             ([InputEvent]::MouseWheel) {
-                if ($Param.ViewOnly)
+                if ($ViewOnly)
                 { continue }
 
                 [User32]::mouse_event([int][MouseFlags]::MOUSEEVENTF_WHEEL, 0, 0, $aEvent.Delta, 0);
@@ -1375,10 +1383,10 @@ $global:IngressEventScriptBlock = {
             # Clipboard Update
             ([InputEvent]::ClipboardUpdated)
             {
-                if ($Param.ViewOnly)
+                if ($ViewOnly)
                 { continue }
 
-                if ($Param.Clipboard -eq ([ClipboardMode]::Disabled) -or $Param.Clipboard -eq ([ClipboardMode]::Send))
+                if ($Clipboard -eq ([ClipboardMode]::Disabled) -or $Clipboard -eq ([ClipboardMode]::Send))
                 { continue }
 
                 if (-not ($aEvent.PSobject.Properties.name -match "Text"))
@@ -1391,6 +1399,8 @@ $global:IngressEventScriptBlock = {
         }
     }
 }
+
+# -------------------------------------------------------------------------------
 
 $global:EgressEventScriptBlock = {
 
@@ -1549,7 +1559,7 @@ $global:EgressEventScriptBlock = {
                 $Data | Add-Member -MemberType NoteProperty -Name "Id" -Value $AEvent
             }
 
-            $Param.Writer.WriteLine(($Data | ConvertTo-Json -Compress))
+            $Writer.WriteLine(($Data | ConvertTo-Json -Compress))
 
             return $true
         }
@@ -1578,8 +1588,8 @@ $global:EgressEventScriptBlock = {
 
                 # Clipboard Update Detection
                 if (
-                    ($Param.Clipboard -eq ([ClipboardMode]::Both) -or $Param.Clipboard -eq ([ClipboardMode]::Send)) `
-                    -and (-not $Param.ViewOnly)
+                    ($Clipboard -eq ([ClipboardMode]::Both) -or $Clipboard -eq ([ClipboardMode]::Send)) `
+                    -and (-not $ViewOnly)
                 )
                 {
                     # IDEA: Check for existing clipboard change event or implement a custom clipboard
@@ -1638,233 +1648,428 @@ $global:EgressEventScriptBlock = {
     $stopWatch.Stop()
 }
 
-function New-RunSpace
+# ----------------------------------------------------------------------------- #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+#  Local Functions                                                              #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+# ----------------------------------------------------------------------------- #
+
+function Write-Banner
 {
     <#
         .SYNOPSIS
-            Create a new PowerShell Runspace.
-
-        .DESCRIPTION
-            Notice: the $host variable is used for debugging purpose to write on caller PowerShell
-            Terminal.
-
-        .PARAMETER ScriptBlock
-            Type: ScriptBlock
-            Default: None
-            Description: Instructions to execute in new runspace.
-
-        .PARAMETER Param
-            Type: PSCustomObject
-            Default: None
-            Description: Object to attach in runspace context.
-
-        .PARAMETER RunspaceApartmentState
-            Type: String
-            Default: "STA"
-            Description: The apartment state of the runspace (Single, Multi).
-
-        .EXAMPLE
-            New-RunSpace -Client $newClient -ScriptBlock { Start-Sleep -Seconds 10 }
+            Output cool information about current PowerShell module to terminal.
     #>
 
+    Write-Host ""
+    Write-Host "Arcane Server " -NoNewLine
+    Write-Host $global:ArcaneVersion -ForegroundColor Cyan
+    Write-Host "Jean-Pierre LESUEUR (" -NoNewLine
+    Write-Host "@DarkCoderSc" -NoNewLine -ForegroundColor Green
+    Write-Host ") " -NoNewLine
+    Write-Host ""
+    Write-Host "License: Apache License (Version 2.0, January 2004)"
+    Write-Host ""
+}
+
+function Write-Log
+{
+    <#
+        .SYNOPSIS
+            Output a log message to terminal with associated "icon".
+
+        .PARAMETER Message
+            Type: String
+            Default: None
+
+            Description: The message to write to terminal.
+
+        .PARAMETER LogKind
+            Type: LogKind Enum
+            Default: Information
+
+            Description: Define the logger "icon" kind.
+    #>
     param(
         [Parameter(Mandatory=$True)]
-        [ScriptBlock] $ScriptBlock,
+        [string] $Message,
 
-        [PSCustomObject] $Param = $null,
-
-        [ValidateSet("STA", "MTA")]
-        [string]$RunspaceApartmentState = "STA"
+        [LogKind] $LogKind = [LogKind]::Information
     )
 
-    $runspace = [RunspaceFactory]::CreateRunspace()
-    $runspace.ThreadOptions = "UseNewThread"
-    $runspace.ApartmentState = $RunspaceApartmentState
-    $runspace.Open()
-
-    if ($Param)
+    switch ($LogKind)
     {
-        $runspace.SessionStateProxy.SetVariable("Param", $Param)
+        ([LogKind]::Warning)
+        {
+            $icon = "!!"
+            $color = [System.ConsoleColor]::Yellow
+
+            break
+        }
+
+        ([LogKind]::Success)
+        {
+            $icon = "OK"
+            $color = [System.ConsoleColor]::Green
+
+            break
+        }
+
+        ([LogKind]::Error)
+        {
+            $icon = "KO"
+            $color = [System.ConsoleColor]::Red
+
+            break
+        }
+
+        default
+        {
+            $color = [System.ConsoleColor]::Cyan
+            $icon = "i"
+        }
     }
 
-    $runspace.SessionStateProxy.SetVariable("HostSyncHash", $global:HostSyncHash)
+    Write-Host "[ " -NoNewLine
+    Write-Host $icon -ForegroundColor $color -NoNewLine
+    Write-Host " ] $Message"
+}
 
-    $powershell = [PowerShell]::Create()
+# -------------------------------------------------------------------------------
 
-    $powershell.AddScript(
-        {
-            # Win32 API Constants
-            $GENERIC_ALL = 0x10000000
+function Write-OperationSuccessState
+{
+    param(
+        [Parameter(Mandatory=$True)]
+        $Result,
 
-            class WinAPIException: System.Exception
-            {
-                WinAPIException([string] $ApiName) : base (
-                    [string]::Format(
-                        "WinApi Exception -> {0}, LastError: {1}",
-                        $ApiName,
-                        [System.Runtime.InteropServices.Marshal]::GetLastWin32Error().ToString()
-                    )
-                )
-                {}
-            }
-
-            function Get-UserObjectInformationName
-            {
-                <#
-                    .SYNOPSIS
-                        Retrieves the name of the specified object.
-
-                    .PARAMETER hObj
-                        A handle to the object.
-                #>
-                param (
-                    [Parameter(Mandatory = $true)]
-                    [IntPtr]$hObj
-                )
-
-                $pvInfo = [IntPtr]::Zero
-                try
-                {
-                    $lpnLengthNeeded = [UInt32]0
-
-                    $UOI_NAME = 0x2
-                    $null = [User32]::GetUserObjectInformation(
-                        $hObj,
-                        $UOI_NAME,
-                        [IntPtr]::Zero,
-                        0,
-                        [ref]$lpnLengthNeeded
-                    )
-
-                    if ($lpnLengthNeeded -eq 0)
-                    {
-                        throw [WinAPIException]::New("GetUserObjectInformation(1)")
-                    }
-
-                    $pvInfo = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($lpnLengthNeeded)
-
-                    $b = [User32]::GetUserObjectInformation(
-                        $desktop,
-                        $UOI_NAME,
-                        $pvInfo,
-                        $lpnLengthNeeded,
-                        [ref]$lpnLengthNeeded
-                    )
-
-                    if ($b -eq $false)
-                    {
-                        throw [WinAPIException]::New("GetUserObjectInformation(2)")
-                    }
-
-                    return [System.Runtime.InteropServices.Marshal]::PtrToStringUni($pvInfo)
-                }
-                finally
-                {
-                    if ($pvInfo -ne [IntPtr]::Zero)
-                    {
-                        [System.Runtime.InteropServices.Marshal]::FreeHGlobal($pvInfo)
-                    }
-                }
-
-                return $objectName
-            }
-
-            function Get-InputDesktopName
-            {
-                <#
-                    .SYNOPSIS
-                        Retrieves the name of the input desktop (Desktop that receive input).
-                #>
-                $desktop = [IntPtr]::Zero
-                try
-                {
-                    $desktop = [User32]::OpenInputDesktop(0, $false, $GENERIC_ALL)
-                    if ($desktop -eq [IntPtr]::Zero)
-                    {
-                        throw [WinAPIException]::New("OpenInputDesktop")
-                    }
-
-                    return Get-UserObjectInformationName -hObj $desktop
-                }
-                finally
-                {
-                    if ($desktop -ne [IntPtr]::Zero)
-                    {
-                        $null = [User32]::CloseDesktop($desktop)
-                    }
-                }
-            }
-
-            function Get-CurrentThreadDesktopName
-            {
-                <#
-                    .SYNOPSIS
-                        Retrieves the name of the desktop associated with the current thread.
-                #>
-                $desktop = [User32]::GetThreadDesktop([Kernel32]::GetCurrentThreadId())
-                if ($desktop -eq [IntPtr]::Zero)
-                {
-                    throw [WinAPIException]::New("GetThreadDesktop")
-                }
-                try
-                {
-                    return Get-UserObjectInformationName -hObj $desktop
-                }
-                finally
-                {
-                    $null = [User32]::CloseDesktop($desktop)
-                }
-            }
-
-            function Update-CurrentThreadDesktop()
-            {
-                <#
-                    .SYNOPSIS
-                        Updates the desktop associated with the current thread if input desktop changed.
-
-                    .DESCRIPTION
-                        Exceptions are catched and ignored.
-                #>
-                try
-                {
-                    $currentThreadDesktopName = Get-CurrentThreadDesktopName
-                    $inputDesktopName = Get-InputDesktopName
-
-                    if ($currentThreadDesktopName -ne "" -and $inputDesktopName -ne "" -and $currentThreadDesktopName -ne $inputDesktopName)
-                    {
-                        $desktop = [User32]::OpenInputDesktop(0, $true,  $GENERIC_ALL)
-                        if ($desktop -eq [IntPtr]::Zero)
-                        {
-                            throw [WinAPIException]::New("OpenInputDesktop")
-                        }
-                        try
-                        {
-                            return [User32]::SetThreadDesktop($desktop)
-                        }
-                        finally {
-                            $null = [User32]::CloseDesktop($desktop)
-                        }
-                    }
-                }
-                catch {}
-                return $false
-            }
-
-        }
+        [Parameter(Mandatory=$True)]
+        $Message
     )
 
-    $null = $powershell.AddScript($ScriptBlock)
+    if ($Result)
+    {
+        $kind = [LogKind]::Success
+    }
+    else
+    {
+        $kind = [LogKind]::Error
+    }
 
-    $powershell.Runspace = $runspace
+    Write-Log -Message $Message -LogKind $kind
+}
 
-    $asyncResult = $powershell.BeginInvoke()
+# -------------------------------------------------------------------------------
 
-    return New-Object PSCustomObject -Property @{
-        Runspace = $runspace
-        PowerShell = $powershell
-        AsyncResult = $asyncResult
+function Invoke-PreventSleepMode
+{
+    <#
+        .SYNOPSIS
+            Prevent computer to enter sleep mode while server is running.
+
+        .DESCRIPTION
+            Function returns thread execution state old flags value. You can use this old flags
+            to restore thread execution to its original state.
+    #>
+
+    $ES_AWAYMODE_REQUIRED = [uint32]"0x00000040"
+    $ES_CONTINUOUS = [uint32]"0x80000000"
+    $ES_SYSTEM_REQUIRED = [uint32]"0x00000001"
+
+    return [Kernel32]::SetThreadExecutionState(
+        $ES_CONTINUOUS -bor
+        $ES_SYSTEM_REQUIRED -bor
+        $ES_AWAYMODE_REQUIRED
+    )
+}
+
+# -------------------------------------------------------------------------------
+
+function Update-ThreadExecutionState
+{
+    <#
+        .SYNOPSIS
+            Update current thread execution state flags.
+
+        .PARAMETER Flags
+            Execution state flags.
+    #>
+    param(
+        [Parameter(Mandatory=$True)]
+        $Flags
+    )
+
+    return [Kernel32]::SetThreadExecutionState($Flags) -ne 0
+}
+
+# -------------------------------------------------------------------------------
+
+function Get-PlainTextPassword
+{
+    <#
+        .SYNOPSIS
+            Retrieve the plain-text version of a secure string.
+
+        .PARAMETER SecurePassword
+            The SecureString object to be reversed.
+
+    #>
+    param(
+        [Parameter(Mandatory=$True)]
+        [SecureString] $SecurePassword
+    )
+
+    $BSTR = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePassword)
+    try
+    {
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($BSTR)
+    }
+    finally
+    {
+        [Runtime.InteropServices.Marshal]::FreeBSTR($BSTR)
     }
 }
+
+# -------------------------------------------------------------------------------
+
+function Test-PasswordComplexity
+{
+    <#
+        .SYNOPSIS
+            Check if password is sufficiently complex.
+
+        .DESCRIPTION
+            To return True, Password must follow bellow complexity rules:
+                * Minimum 12 Characters.
+                * One of following symbols: "!@#%^&*_".
+                * At least of lower case character.
+                * At least of upper case character.
+
+        .PARAMETER SecurePasswordCandidate
+            Type: SecureString
+            Default: None
+            Description: Secure String object containing the password to test.
+    #>
+    param (
+        [Parameter(Mandatory=$True)]
+        [SecureString] $SecurePasswordCandidate
+    )
+
+    $complexityRules = "(?=^.{12,}$)(?=.*[!@#%^&*_]+)(?=.*[a-z])(?=.*[A-Z]).*$"
+
+    return (Get-PlainTextPassword -SecurePassword $SecurePasswordCandidate) -match $complexityRules
+}
+
+# -------------------------------------------------------------------------------
+
+function New-RandomPassword
+{
+    <#
+        .SYNOPSIS
+            Generate a new secure password.
+
+        .DESCRIPTION
+            Generate new password candidates until one candidate match complexity rules.
+            Generally only one iteration is enough but in some rare case it could be one or two more.
+    #>
+    do
+    {
+        $authorizedChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#%^&*_"
+
+        $candidate = -join ((1..18) | ForEach-Object { Get-Random -Input $authorizedChars.ToCharArray() })
+
+        $secureCandidate = ConvertTo-SecureString -String $candidate -AsPlainText -Force
+    } until (Test-PasswordComplexity -SecurePasswordCandidate $secureCandidate)
+
+    $candidate = $null
+
+    return $secureCandidate
+}
+
+# -------------------------------------------------------------------------------
+
+function Get-DefaultCertificateOrCreate
+{
+    <#
+        .SYNOPSIS
+            Get default certificate from user store or create a new one.
+    #>
+    param (
+        [string] $SubjectName = "Arcane.Server",
+        [string] $StorePath = "cert:\CurrentUser\My",
+        [int] $CertExpirationInDays = 365
+    )
+
+    $certificates = Get-ChildItem -Path $StorePath | Where-Object { $_.Subject -eq "CN=" + $SubjectName }
+
+    if (-not $certificates)
+    {
+        return New-SelfSignedCertificate -CertStoreLocation $StorePath `
+                -NotAfter (Get-Date).AddDays($CertExpirationInDays) `
+                -Subject $SubjectName
+    }
+    else
+    {
+        return $certificates[0]
+    }
+}
+
+# -------------------------------------------------------------------------------
+
+function Get-SHA512FromString
+{
+    <#
+        .SYNOPSIS
+            Return the SHA512 value from string.
+
+        .PARAMETER String
+            Type: String
+            Default : None
+            Description: A String to hash.
+
+        .EXAMPLE
+            Get-SHA512FromString -String "Hello, World"
+    #>
+    param (
+        [Parameter(Mandatory=$True)]
+        [string] $String
+    )
+
+    $buffer = [IO.MemoryStream]::new([byte[]][char[]]$String)
+
+    return (Get-FileHash -InputStream $buffer -Algorithm SHA512).Hash
+}
+
+# -------------------------------------------------------------------------------
+
+function Resolve-AuthenticationChallenge
+{
+    <#
+        .SYNOPSIS
+            Algorithm to solve the server challenge during password authentication.
+
+        .DESCRIPTION
+            Server needs to resolve the challenge and keep the solution in memory before sending
+            the candidate to remote peer.
+
+        .PARAMETER Password
+            Type: SecureString
+            Default: None
+            Description: Secure String object containing the password for resolving challenge.
+
+        .PARAMETER Candidate
+            Type: String
+            Default: None
+            Description:
+                Random string used to solve the challenge. This string is public and is set across network by server.
+                Each time a new connection is requested to server, a new candidate is generated.
+
+        .EXAMPLE
+            Resolve-AuthenticationChallenge -Password "s3cr3t!" -Candidate "rKcjdh154@]=Ldc"
+    #>
+    param (
+       [Parameter(Mandatory=$True)]
+       [SecureString] $SecurePassword,
+
+       [Parameter(Mandatory=$True)]
+       [string] $Candidate
+    )
+
+    $pbkdf2 = New-Object System.Security.Cryptography.Rfc2898DeriveBytes(
+        (Get-PlainTextPassword -SecurePassword $SecurePassword),
+        [Text.Encoding]::UTF8.GetBytes($Candidate),
+        1000,
+        [System.Security.Cryptography.HashAlgorithmName]::SHA512
+    )
+    try
+    {
+        return -join ($pbkdf2.GetBytes(64) | ForEach-Object { "{0:X2}" -f $_ })
+    }
+    finally {
+        $pbkdf2.Dispose()
+    }
+}
+
+# -------------------------------------------------------------------------------
+
+function Test-WinAPI
+{
+    <#
+        .SYNOPSIS
+            Check if Windows API is available on current system.
+
+        .DESCRIPTION
+            Bellow is another technique to check if a Win32 API function is available on current system.
+            But I prefer to limit crashing code to validate something.
+            ```
+                try
+                {
+                    $null = # CALL TO WIN32 API FUNCTION
+
+                    return $true
+                }
+                catch
+                {
+                    return $false
+                }
+            ```
+    #>
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $LibraryName,
+
+        [Parameter(Mandatory = $true)]
+        [string] $ApiName
+    )
+
+    $hModule = [Kernel32]::LoadLibrary($LibraryName)
+    try
+    {
+        if ($hModule -eq [IntPtr]::Zero)
+        {
+            return $false
+        }
+
+        $proc = [Kernel32]::GetProcAddress($hModule, $ApiName)
+
+        return $proc -ne [IntPtr]::Zero
+    }
+    finally
+    {
+        $null = [Kernel32]::FreeLibrary($hModule)
+    }
+}
+
+# -------------------------------------------------------------------------------
+
+function Test-Administrator
+{
+    <#
+        .SYNOPSIS
+            Check if current user is administrator.
+    #>
+    $windowsPrincipal = New-Object Security.Principal.WindowsPrincipal(
+        [Security.Principal.WindowsIdentity]::GetCurrent()
+    )
+
+    return $windowsPrincipal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+}
+
+# ----------------------------------------------------------------------------- #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+#  Local Classes                                                                #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+# ----------------------------------------------------------------------------- #
 
 class ClientIO {
     [System.Net.Sockets.TcpClient] $Client = $null
@@ -2081,6 +2286,8 @@ class ClientIO {
     }
 }
 
+# -------------------------------------------------------------------------------
+
 class TcpListenerEx : System.Net.Sockets.TcpListener
 {
     TcpListenerEx([string] $ListenAddress, [int] $ListenPort) : base($ListenAddress, $ListenPort)
@@ -2091,6 +2298,8 @@ class TcpListenerEx : System.Net.Sockets.TcpListener
         return $this.Active
     }
 }
+
+# -------------------------------------------------------------------------------
 
 class ServerIO {
     [TcpListenerEx] $Server = $null
@@ -2222,6 +2431,8 @@ class ServerIO {
     }
 }
 
+# -------------------------------------------------------------------------------
+
 class ServerSession {
     [string] $Id = ""
     [bool] $ViewOnly = $false
@@ -2274,12 +2485,25 @@ class ServerSession {
                 Type: ClientIO
                 Description: Established connection with a remote peer.
         #>
-        $param = New-Object -TypeName PSCustomObject -Property @{
-            Client = $Client
-            SafeHash = $this.SafeHash
-        }
 
-        $this.WorkerThreads.Add((New-RunSpace -ScriptBlock $global:DesktopStreamScriptBlock -Param $param -RunspaceApartmentState "MTA"))
+        $this.WorkerThreads.Add(
+            (
+                New-RunSpace -RunspaceApartmentState "MTA" -ScriptBlocks @(
+                    $global:WinAPI_Const_ScriptBlock,
+                    $global:WinAPIException_Class_ScriptBlock,
+                    $global:GetUserObjectInformation_Func_ScriptBlock,
+                    $global:GetInputDesktopName_Func_ScriptBlock,
+                    $global:GetCurrentThreadDesktopName_Func_ScriptBlock,
+                    $global:UpdateCurrentThreadDesktopWithInputDesktop_Func_ScriptBlock,
+
+                    $global:DesktopStreamScriptBlock
+                ) -Params @{
+                    "HostSyncHash" = $global:HostSyncHash
+                    "Client" = $Client
+                    "SafeHash" = $this.SafeHash
+                }
+            )
+        )
 
         ###
 
@@ -2297,24 +2521,31 @@ class ServerSession {
                 Description: Established connection with a remote peer.
         #>
 
-        $param = New-Object -TypeName PSCustomObject -Property @{
-            Writer = $Client.Writer
-            Clipboard = $this.Clipboard
-            SafeHash = $this.SafeHash
-        }
-
-        $this.WorkerThreads.Add((New-RunSpace -ScriptBlock $global:EgressEventScriptBlock -Param $param))
+        $this.WorkerThreads.Add(
+            (
+                New-RunSpace -ScriptBlocks @($global:EgressEventScriptBlock) -Params @{
+                    "HostSyncHash" = $global:HostSyncHash
+                    "Writer" = $Client.Writer
+                    "Clipboard" = $this.Clipboard
+                    "ViewOnly" = $this.ViewOnly
+                    "SafeHash" = $this.SafeHash
+                }
+            )
+        )
 
         ###
 
-        $param = New-Object -TypeName PSCustomObject -Property @{
-            Reader = $Client.Reader
-            Clipboard = $this.Clipboard
-            ViewOnly = $this.ViewOnly
-            SafeHash = $this.SafeHash
-        }
-
-        $this.WorkerThreads.Add((New-RunSpace -ScriptBlock $global:IngressEventScriptBlock -Param $param))
+        $this.WorkerThreads.Add(
+            (
+                New-RunSpace -ScriptBlocks @($global:IngressEventScriptBlock) -Params @{
+                    "HostSyncHash" = $global:HostSyncHash
+                    "Reader" = $Client.Reader
+                    "Clipboard" = $this.Clipboard
+                    "ViewOnly" = $this.ViewOnly
+                    "SafeHash" = $this.SafeHash
+                }
+            )
+        )
 
         ###
 
@@ -2404,6 +2635,8 @@ class ServerSession {
         Write-Verbose "Session closed."
     }
 }
+
+# -------------------------------------------------------------------------------
 
 class SessionManager {
     [ServerIO] $Server = $null
@@ -2753,68 +2986,7 @@ class SessionManager {
     }
 }
 
-function Test-WinAPI
-{
-    <#
-        .SYNOPSIS
-            Check if Windows API is available on current system.
-
-        .DESCRIPTION
-            Bellow is another technique to check if a Win32 API function is available on current system.
-            But I prefer to limit crashing code to validate something.
-            ```
-                try
-                {
-                    $null = # CALL TO WIN32 API FUNCTION
-
-                    return $true
-                }
-                catch
-                {
-                    return $false
-                }
-            ```
-    #>
-    param (
-        [Parameter(Mandatory = $true)]
-        [string] $LibraryName,
-
-        [Parameter(Mandatory = $true)]
-        [string] $ApiName
-    )
-
-    $hModule = [Kernel32]::LoadLibrary($LibraryName)
-    try
-    {
-        if ($hModule -eq [IntPtr]::Zero)
-        {
-            return $false
-        }
-
-        $proc = [Kernel32]::GetProcAddress($hModule, $ApiName)
-
-        return $proc -ne [IntPtr]::Zero
-    }
-    finally
-    {
-        $null = [Kernel32]::FreeLibrary($hModule)
-    }
-}
-
-function Test-Administrator
-{
-    <#
-        .SYNOPSIS
-            Check if current user is administrator.
-    #>
-    $windowsPrincipal = New-Object Security.Principal.WindowsPrincipal(
-        [Security.Principal.WindowsIdentity]::GetCurrent()
-    )
-
-    return $windowsPrincipal.IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator
-    )
-}
+# -------------------------------------------------------------------------------
 
 class ValidateFileAttribute : System.Management.Automation.ValidateArgumentsAttribute
 {
@@ -2832,6 +3004,8 @@ class ValidateFileAttribute : System.Management.Automation.ValidateArgumentsAttr
     }
 }
 
+# -------------------------------------------------------------------------------
+
 class ValidateBase64StringAttribute : System.Management.Automation.ValidateArgumentsAttribute
 {
     <#
@@ -2844,6 +3018,16 @@ class ValidateBase64StringAttribute : System.Management.Automation.ValidateArgum
         [Convert]::FromBase64String($arguments)
     }
 }
+
+# ----------------------------------------------------------------------------- #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+#  Arcane Entry Point                                                           #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+# ----------------------------------------------------------------------------- #
 
 function Invoke-ArcaneServer
 {
@@ -3108,6 +3292,8 @@ function Invoke-ArcaneServer
         $VerbosePreference = $oldVerbosePreference
     }
 }
+
+# -------------------------------------------------------------------------------
 
 try {
     Export-ModuleMember -Function Invoke-ArcaneServer
