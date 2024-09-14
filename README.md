@@ -35,6 +35,39 @@ Invoke-ArcaneServer
 
 That's it, you're ready to go! 🚀
 
+## Capture LogonUI / UAC (Secure Desktop)
+
+Starting with version `1.0.5` of Arcane Server, **Secure Desktop** is fully supported using just a single instance of the server. This enhancement allows you to log in to your computer directly from Arcane or respond to UAC (User Account Control) prompts. This feature is crucial for those who wish to use Arcane as a day-to-day remote desktop application.
+
+In the near future, I will publish an article detailing how I implemented this feature without relying on third-party services, unlike other remote desktop applications.
+
+To support **Secure Desktop** capture, the Server must be run as an Interactive **NT/Authority SYSTEM** process. "Interactive" means a SYSTEM process that has access to the active desktop session you wish to capture. Tools like **PsExec** can facilitate this by spawning a separate interactive process as SYSTEM. However, PsExec can sometimes be flagged as malicious, as it's frequently used by threat actors and red teamers.
+
+Fortunately, a few years ago, I developed a PowerShell script called [PowerRunAsSystem](https://github.com/PhrozenIO/PowerRunAsSystem). This script allows you to spawn an interactive SYSTEM process using only native Windows functions, without relying on external tools. You can install **PowerRunAsSystem** directly via the PowerShell Gallery:
+
+> ⚠️ Please note that you must have administrative privileges to install a new PowerShell module.
+
+```powershell
+Install-Module -Name PowerRunAsSystem
+```
+
+In the same PowerShell session or a new one with administrative privileges, import the newly installed module using:
+
+> ⓘ depending on your system configuration, you may need to run the following command to temporarily bypass the execution policy in order to run an unsigned script:
+> `powershell.exe -executionpolicy bypass`
+
+```powershell
+Import-Module PowerRunAsSystem
+```
+
+Now you can call:
+
+```powershell
+ Invoke-InteractiveSystemPowerShell
+```
+
+A new PowerShell command prompt should open with SYSTEM privileges. You can verify this by running the command `whoami`. From this prompt, you can now start your Arcane Server as you would in a regular prompt. When Arcane Server is run under the SYSTEM user account, it automatically detects this and enables Secure Desktop interaction capabilities.
+
 ## Version Table
 
 | Version         | Protocol Version | Release Date    | 
@@ -124,4 +157,7 @@ base64 -i /tmp/phrozen.p12
 ```
 
 You can then pass the output base64 certificate file to parameter `EncodedCertificate` (One line)
+
+## Changelog
+
 

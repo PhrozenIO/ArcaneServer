@@ -26,7 +26,7 @@
         in the software.
 
     .Notice
-        Writing the entire code in a single PowerShell script is wished, 
+        Writing the entire code in a single PowerShell script is wished,
         allowing it to function both as a module or a standalone script.
 
 -------------------------------------------------------------------------------#>
@@ -107,6 +107,21 @@ Add-Type @"
 
     public static class User32
     {
+        [DllImport("user32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool OpenClipboard(IntPtr hWndNewOwner);
+
+        [DllImport("user32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool CloseClipboard();
+
+        [DllImport("user32.dll", SetLastError=true)]
+        public static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
+
+        [DllImport("user32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool EmptyClipboard();
+
         [DllImport("User32.dll", SetLastError=false)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool SetProcessDPIAware();
@@ -140,6 +155,14 @@ Add-Type @"
             uint dwDesiredAccess
         );
 
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern IntPtr OpenDesktop(
+            string lpszDesktop,
+            uint dwFlags,
+            bool fInherit,
+            uint dwDesiredAccess
+        );
+
         [DllImport("user32.dll", SetLastError=true, CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool GetUserObjectInformation(
@@ -164,10 +187,17 @@ Add-Type @"
         public static extern bool SetThreadDesktop(
             IntPtr hDesktop
         );
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
     }
 
     public static class Kernel32
     {
+        [DllImport("kernel32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GlobalUnlock(IntPtr hMem);
+
         [DllImport("Kernel32.dll", SetLastError=true)]
         [return: MarshalAs(UnmanagedType.U4)]
         public static extern uint SetThreadExecutionState(uint esFlags);
@@ -276,6 +306,10 @@ Add-Type @"
 
 $global:WinAPI_Const_ScriptBlock = {
     $GENERIC_ALL = 0x10000000
+
+    $VK_LWIN = 0x5B;
+    $KEYEVENTF_KEYDOWN = 0x0;
+    $KEYEVENTF_KEYUP = 0x2;
 }
 
 # -------------------------------------------------------------------------------
@@ -435,7 +469,7 @@ $global:UpdateCurrentThreadDesktop_Func_ScriptBlock = {
         if ($desktop -eq [IntPtr]::Zero)
         {
             throw [WinAPIException]::New("OpenDesktop")
-        }    
+        }
         try
         {
             if (-not [User32]::SetThreadDesktop($desktop))
@@ -546,7 +580,7 @@ $global:NewRunSpace_Func_ScriptBlock = {
         $powershell = [PowerShell]::Create()
 
         foreach ($scriptBlock in $ScriptBlocks)
-        {        
+        {
             $null = $powershell.AddScript($scriptBlock)
         }
 
@@ -724,7 +758,7 @@ $global:DesktopStreamScriptBlock = {
                 $_.DeviceName -eq $viewerExpectation.ScreenName
             }
 
-            # TODO: Add other parameters
+            # Add other parameters if needed
         }
 
         if (-not $screen)
@@ -766,10 +800,6 @@ $global:DesktopStreamScriptBlock = {
         $encoder = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' };
 
         $collapsed = $false
-
-        # Check if current arcane server is running under NT AUTHORITY\SYSTEM
-        # This is required to capture secure desktop (Winlogon)
-        $logonUIAccess = [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
 
         while ($SafeHash.SessionActive)
         {
@@ -1199,7 +1229,7 @@ $global:DesktopStreamScriptBlock = {
 
 # -------------------------------------------------------------------------------
 
-$global:IngressEventScriptBlock = {
+$global:HandleInputEvent_ScriptBlock = {
     enum MouseFlags {
         MOUSEEVENTF_ABSOLUTE = 0x8000
         MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -1258,143 +1288,293 @@ $global:IngressEventScriptBlock = {
         );
     }
 
-    while ($true)
-    {
+    function Invoke-SetClipboardData {
+        <#
+            .SYNOPSIS
+                Set text to clipboard using Windows API only.
+    
+            .DESCRIPTION
+                Using Windows API to set text to clipboard is required to support MTA Runspaces.
+    
+            .PARAMETER Text
+                Text to set to clipboard.
+        #>
+        param(
+            [Parameter(Mandatory=$true)]
+            [string]$Text
+        )
+
+        if (-not [User32]::OpenClipboard([IntPtr]::Zero)) {
+            throw [WinAPIException]::new("OpenClipboard")
+        }
         try
         {
-            $jsonEvent = $Reader.ReadLine()
-        }
-        catch
-        {
-            # ($_ | Out-File "c:\temp\debug.txt")
-
-            break
-        }
-
-        try
-        {
-            $aEvent = $jsonEvent | ConvertFrom-Json
-        }
-        catch { continue }
-
-        if (-not ($aEvent.PSobject.Properties.name -match "Id"))
-        { continue }
-
-        switch ([InputEvent] $aEvent.Id)
-        {
-            # Keyboard Input Simulation
-            ([InputEvent]::Keyboard)
-            {
-                if ($ViewOnly)
-                { continue }
-
-                if (-not ($aEvent.PSobject.Properties.name -match "Keys"))
-                { break }
-
-                [System.Windows.Forms.SendKeys]::SendWait($aEvent.Keys)
-
-                break
+            if (-not [User32]::EmptyClipboard()) {
+                throw [WinAPIException]::new("EmptyClipboard")
+            }
+    
+            $hGlobal = [System.Runtime.InteropServices.Marshal]::StringToHGlobalUni($Text)
+            if ($hGlobal -eq [IntPtr]::Zero) {
+                return
             }
 
-            # Mouse Move & Click Simulation
-            ([InputEvent]::MouseClickMove)
+            $CF_UNICODETEXT = 13
+            if ([User32]::SetClipboardData($CF_UNICODETEXT, $hGlobal) -eq [IntPtr]::Zero) {
+                [System.Runtime.InteropServices.Marshal]::FreeHGlobal($hGlobal)
+
+                throw [WinAPIException]::new("SetClipboardData")
+            }
+        }
+        finally
+        {
+            $null = [User32]::CloseClipboard()
+        }
+    }
+
+    function Invoke-InputEvent
+    {
+        param([PSCustomObject] $aEvent = $null)
+
+        try
+        {
+            if (-not $aEvent)
+            { return }
+
+            switch ([InputEvent] $aEvent.Id)
             {
-                if ($ViewOnly)
-                { continue }
-
-                if (-not ($aEvent.PSobject.Properties.name -match "Type"))
-                { break }
-
-                switch ([MouseState] $aEvent.Type)
+                # Keyboard Input Simulation
+                ([InputEvent]::Keyboard)
                 {
-                    # Mouse Down/Up
-                    {($_ -eq ([MouseState]::Down)) -or ($_ -eq ([MouseState]::Up))}
+                    if (-not ($aEvent.PSobject.Properties.name -match "Keys"))
+                    { break }
+
+                    if ($aEvent.Keys -eq "^{ESC}")
                     {
-                        #[User32]::SetCursorPos($aEvent.X, $aEvent.Y)
-                        Set-MouseCursorPos -X $aEvent.X -Y $aEvent.Y
-
-                        $down = ($_ -eq ([MouseState]::Down))
-
-                        $mouseCode = [int][MouseFlags]::MOUSEEVENTF_LEFTDOWN
-                        if (-not $down)
-                        {
-                            $mouseCode = [int][MouseFlags]::MOUSEEVENTF_LEFTUP
-                        }
-
-                        switch($aEvent.Button)
-                        {
-                            "Right"
-                            {
-                                if ($down)
-                                {
-                                    $mouseCode = [int][MouseFlags]::MOUSEEVENTF_RIGHTDOWN
-                                }
-                                else
-                                {
-                                    $mouseCode = [int][MouseFlags]::MOUSEEVENTF_RIGHTUP
-                                }
-
-                                break
-                            }
-
-                            "Middle"
-                            {
-                                if ($down)
-                                {
-                                    $mouseCode = [int][MouseFlags]::MOUSEEVENTF_MIDDLEDOWN
-                                }
-                                else
-                                {
-                                    $mouseCode = [int][MouseFlags]::MOUSEEVENTF_MIDDLEUP
-                                }
-                            }
-                        }
-                        [User32]::mouse_event($mouseCode, 0, 0, 0, 0);
-
-                        break
+                        # When running as interactive SYSTEM process, `^{ESC}` is not working from `SendWait` method
+                        # Instead we rely on `keybd_event` method to simulate the key combination
+                        [User32]::keybd_event($VK_LWIN, 0, $KEYEVENTF_KEYDOWN, [UIntPtr]::Zero)
+                        [User32]::keybd_event($VK_LWIN, 0, $KEYEVENTF_KEYUP, [UIntPtr]::Zero)
+                    }
+                    else
+                    {
+                        [System.Windows.Forms.SendKeys]::SendWait($aEvent.Keys)
                     }
 
-                    # Mouse Move
-                    ([MouseState]::Move)
-                    {
-                        if ($ViewOnly)
-                        { continue }
-
-                        #[User32]::SetCursorPos($aEvent.X, $aEvent.Y)
-                        Set-MouseCursorPos -X $aEvent.X -Y $aEvent.Y
-
-                        break
-                    }
+                    break
                 }
 
-                break
+                # Mouse Move & Click Simulation
+                ([InputEvent]::MouseClickMove)
+                {
+                    if (-not ($aEvent.PSobject.Properties.name -match "Type"))
+                    { break }
+
+                    switch ([MouseState] $aEvent.Type)
+                    {
+                        # Mouse Down/Up
+                        {($_ -eq ([MouseState]::Down)) -or ($_ -eq ([MouseState]::Up))}
+                        {
+                            #[User32]::SetCursorPos($aEvent.X, $aEvent.Y)
+                            Set-MouseCursorPos -X $aEvent.X -Y $aEvent.Y
+
+                            $down = ($_ -eq ([MouseState]::Down))
+
+                            $mouseCode = [int][MouseFlags]::MOUSEEVENTF_LEFTDOWN
+                            if (-not $down)
+                            {
+                                $mouseCode = [int][MouseFlags]::MOUSEEVENTF_LEFTUP
+                            }
+
+                            switch($aEvent.Button)
+                            {
+                                "Right"
+                                {
+                                    if ($down)
+                                    {
+                                        $mouseCode = [int][MouseFlags]::MOUSEEVENTF_RIGHTDOWN
+                                    }
+                                    else
+                                    {
+                                        $mouseCode = [int][MouseFlags]::MOUSEEVENTF_RIGHTUP
+                                    }
+
+                                    break
+                                }
+
+                                "Middle"
+                                {
+                                    if ($down)
+                                    {
+                                        $mouseCode = [int][MouseFlags]::MOUSEEVENTF_MIDDLEDOWN
+                                    }
+                                    else
+                                    {
+                                        $mouseCode = [int][MouseFlags]::MOUSEEVENTF_MIDDLEUP
+                                    }
+                                }
+                            }
+                            [User32]::mouse_event($mouseCode, 0, 0, 0, 0);
+
+                            break
+                        }
+
+                        # Mouse Move
+                        ([MouseState]::Move)
+                        {
+                            #[User32]::SetCursorPos($aEvent.X, $aEvent.Y)
+                            Set-MouseCursorPos -X $aEvent.X -Y $aEvent.Y
+
+                            break
+                        }
+                    }
+
+                    break
+                }
+
+                # Mouse Wheel Simulation
+                ([InputEvent]::MouseWheel) {
+                    [User32]::mouse_event([int][MouseFlags]::MOUSEEVENTF_WHEEL, 0, 0, $aEvent.Delta, 0);
+
+                    break
+                }
+
+                # Clipboard Update
+                ([InputEvent]::ClipboardUpdated)
+                {
+                    if ($Clipboard -eq ([ClipboardMode]::Disabled) -or $Clipboard -eq ([ClipboardMode]::Send))
+                    { break }
+
+                    if (-not ($aEvent.PSobject.Properties.name -match "Text"))
+                    { break }
+
+                    $HostSyncHash.ClipboardText = $aEvent.Text
+
+                    Invoke-SetClipboardData -Text $aEvent.Text
+                }
             }
+        }
+        catch {}
+    }
+}
 
-            # Mouse Wheel Simulation
-            ([InputEvent]::MouseWheel) {
-                if ($ViewOnly)
-                { continue }
+# -------------------------------------------------------------------------------
 
-                [User32]::mouse_event([int][MouseFlags]::MOUSEEVENTF_WHEEL, 0, 0, $aEvent.Delta, 0);
+$global:IngressEventScriptBlock = {
+    if ($LogonUIAccess)
+    {
+        $BouncedInputControl_ScriptBlock = {
+            # Important Notice: Capturing both the regular and secure desktop (e.g., LogonUI, UAC prompts)
+            # in a single process is typically not feasible. My approach for the remote desktop thread involves
+            # dynamically switching desktops, as the thread does not directly interact with the desktop and can
+            # update its desktop context. However, this method does not work with the Input Thread due to its
+            # direct interaction with the desktop, which prevents updating the thread's desktop context.
+            # To resolve this, I created an additional thread(s) (Runspace(s)) and switched it to the detected desktop.
+            # This allows interaction with the desktop without issues, with each Input thread managing its own desktop.
+            # While this method is working, it may not be optimal, future versions may explore alternatives that do
+            # not require multiple threads by avoiding methods that lock the current thread's desktop and using WinAPI's
+            # Extensive testing will be necessary to validate these potential solutions.
+            Update-CurrentThreadDesktop -DesktopName $desktopName
 
-                break
-            }
-
-            # Clipboard Update
-            ([InputEvent]::ClipboardUpdated)
+            while ($SafeHash.SessionActive)
             {
-                if ($ViewOnly)
-                { continue }
+                $inputEvent.WaitOne()
 
-                if ($Clipboard -eq ([ClipboardMode]::Disabled) -or $Clipboard -eq ([ClipboardMode]::Send))
-                { continue }
+                # Check if even concern current input desktop before popping items from the queue
+                if (Get-CurrentThreadDesktopName -eq $desktopName)
+                {
+                    $aEvent = $null
+                    while ($inputQueue.TryDequeue([ref]$aEvent)) {
+                        Invoke-InputEvent -aEvent $aEvent
+                    }
 
-                if (-not ($aEvent.PSobject.Properties.name -match "Text"))
-                { continue }
+                    $inputEvent.Reset()
+                }
+            }
+        }
 
-                $HostSyncHash.ClipboardText = $aEvent.Text
+        $desktop_runspaces = @{}
 
-                Set-Clipboard -Value $aEvent.Text
+        $defaultDesktopName = Get-CurrentThreadDesktopName
+        $inputQueue = [System.Collections.Concurrent.ConcurrentQueue[Object]]::new()
+        $inputEvent = [System.Threading.ManualResetEvent]::new($false)
+    }
+
+    try
+    {
+        while ($SafeHash.SessionActive)
+        {
+            try
+            {
+                $jsonEvent = $Reader.ReadLine()
+            }
+            catch
+            {
+                # ($_ | Out-File "c:\temp\debug.txt")
+
+                break
+            }
+
+            try
+            {
+                $aEvent = $jsonEvent | ConvertFrom-Json
+            }
+            catch { continue }
+
+            if (-not ($aEvent.PSobject.Properties.name -match "Id"))
+            { continue }
+
+            if ($LogonUIAccess)
+            {
+                $currentInputDesktopName = Get-InputDesktopName
+                if ($currentInputDesktopName -ne $defaultDesktopName)
+                {
+                    if (-not $desktop_runspaces.ContainsKey($currentInputDesktopName))
+                    {
+                        $params = @{
+                            "inputQueue" = $inputQueue
+                            "inputEvent" = $inputEvent
+                            "desktopName" = $currentInputDesktopName
+                            "SafeHash" = $SafeHash
+                            "HostSyncHash" = $HostSyncHash
+                            "Clipboard" = $Clipboard
+                        }
+
+                        $desktop_runspaces[$currentInputDesktopName] = (
+                            New-RunSpace -RunspaceApartmentState "MTA" -ScriptBlocks @(
+                                # Runspace Required Functions
+                                $global:WinAPI_Const_ScriptBlock,
+                                $global:WinAPIException_Class_ScriptBlock,
+                                $global:UpdateCurrentThreadDesktop_Func_ScriptBlock,
+                                $global:GetCurrentThreadDesktopName_Func_ScriptBlock,
+                                $global:GetUserObjectInformation_Func_ScriptBlock,
+                                $global:HandleInputEvent_ScriptBlock,
+
+                                # Runspace Entrypoint
+                                $BouncedInputControl_ScriptBlock
+                        ) -Params $params)
+                    }
+
+                    # Bounce the input event to the current input desktop (Probably Winlogon)
+                    $inputQueue.Enqueue($aEvent)
+                    $null = $inputEvent.Set()
+
+                    continue
+                }
+            }
+
+            # Handle Event in default desktop
+            Invoke-InputEvent -aEvent $aEvent
+        }
+    }
+    finally
+    {
+        if ($LogonUIAccess)
+        {
+            foreach ($desktop_runspaces in $runspaces.Values)
+            {
+                $null = $desktop_runspaces.PowerShell.EndInvoke($desktop_runspaces.AsyncResult)
+                $desktop_runspaces.PowerShell.Runspace.Dispose()
+                $desktop_runspaces.PowerShell.Dispose()
             }
         }
     }
@@ -1575,7 +1755,7 @@ $global:EgressEventScriptBlock = {
 
     $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-    while ($true)
+    while ($SafeHash.SessionActive)
     {
         # Events that occurs every seconds needs to be placed bellow.
         # If no event has occured during this second we send a Keep-Alive signal to
@@ -1588,8 +1768,7 @@ $global:EgressEventScriptBlock = {
 
                 # Clipboard Update Detection
                 if (
-                    ($Clipboard -eq ([ClipboardMode]::Both) -or $Clipboard -eq ([ClipboardMode]::Send)) `
-                    -and (-not $ViewOnly)
+                    ($Clipboard -eq ([ClipboardMode]::Both) -or $Clipboard -eq ([ClipboardMode]::Send))
                 )
                 {
                     # IDEA: Check for existing clipboard change event or implement a custom clipboard
@@ -2438,6 +2617,7 @@ class ServerSession {
     [bool] $ViewOnly = $false
     [ClipboardMode] $Clipboard = [ClipboardMode]::Both
     [string] $ViewerLocation = ""
+    [bool] $logonUIAccess = $false
 
     [System.Collections.Generic.List[PSCustomObject]]
     $WorkerThreads = @()
@@ -2460,6 +2640,10 @@ class ServerSession {
         $this.ViewOnly = $ViewOnly
         $this.Clipboard = $Clipboard
         $this.ViewerLocation = $ViewerLocation
+
+        # Check if current arcane server is running under NT AUTHORITY\SYSTEM
+        # This is required to capture secure desktop (Winlogon)
+        $this.logonUIAccess = [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
     }
 
     [bool] CompareSession([string] $Id)
@@ -2489,6 +2673,7 @@ class ServerSession {
         $this.WorkerThreads.Add(
             (
                 New-RunSpace -RunspaceApartmentState "MTA" -ScriptBlocks @(
+                    # Runspace Required Functions
                     $global:WinAPI_Const_ScriptBlock,
                     $global:WinAPIException_Class_ScriptBlock,
                     $global:GetUserObjectInformation_Func_ScriptBlock,
@@ -2496,11 +2681,14 @@ class ServerSession {
                     $global:GetCurrentThreadDesktopName_Func_ScriptBlock,
                     $global:UpdateCurrentThreadDesktopWithInputDesktop_Func_ScriptBlock,
 
+                    # Runspace Entrypoint
                     $global:DesktopStreamScriptBlock
                 ) -Params @{
+                    # Required Runspace Variables
                     "HostSyncHash" = $global:HostSyncHash
                     "Client" = $Client
                     "SafeHash" = $this.SafeHash
+                    "LogonUIAccess" = $this.logonUIAccess
                 }
             )
         )
@@ -2521,28 +2709,69 @@ class ServerSession {
                 Description: Established connection with a remote peer.
         #>
 
+        if ($this.ViewOnly)
+        {
+            # Ignore demand for event worker if session is view only.
+            return
+        }
+
         $this.WorkerThreads.Add(
             (
-                New-RunSpace -ScriptBlocks @($global:EgressEventScriptBlock) -Params @{
+                New-RunSpace -ScriptBlocks @(
+                    # Runspace Entrypoint
+                    $global:EgressEventScriptBlock
+                ) -Params @{
+                    # Required Runspace Variables
                     "HostSyncHash" = $global:HostSyncHash
                     "Writer" = $Client.Writer
                     "Clipboard" = $this.Clipboard
-                    "ViewOnly" = $this.ViewOnly
                     "SafeHash" = $this.SafeHash
+                    "LogonUIAccess" = $this.logonUIAccess
                 }
             )
         )
 
         ###
 
+        if ($this.LogonUIAccess)
+        {
+            $runspaceApartmentState = "MTA"
+        }
+        else
+        {
+            $runspaceApartmentState = "STA"
+        }
+
         $this.WorkerThreads.Add(
             (
-                New-RunSpace -ScriptBlocks @($global:IngressEventScriptBlock) -Params @{
+                New-RunSpace -RunspaceApartmentState $runspaceApartmentState -ScriptBlocks @(
+                    # Runspace Required Functions
+                    $global:WinAPI_Const_ScriptBlock,
+                    $global:WinAPIException_Class_ScriptBlock,
+                    $global:GetCurrentThreadDesktopName_Func_ScriptBlock,
+                    $global:GetInputDesktopName_Func_ScriptBlock,
+                    $global:GetUserObjectInformation_Func_ScriptBlock,
+                    $global:NewRunSpace_Func_ScriptBlock,
+                    $global:HandleInputEvent_ScriptBlock,
+
+                    # Runspace Entrypoint
+                    $global:IngressEventScriptBlock
+                ) -Params @{
+                    # Required Runspace Variables
                     "HostSyncHash" = $global:HostSyncHash
                     "Reader" = $Client.Reader
                     "Clipboard" = $this.Clipboard
-                    "ViewOnly" = $this.ViewOnly
                     "SafeHash" = $this.SafeHash
+                    "LogonUIAccess" = $this.logonUIAccess
+
+                    # Required Script Blocks (LogonUIAccess)
+                    "WinAPI_Const_ScriptBlock" = $global:WinAPI_Const_ScriptBlock
+                    "WinAPIException_Class_ScriptBlock" = $global:WinAPIException_Class_ScriptBlock
+                    "UpdateCurrentThreadDesktop_Func_ScriptBlock" = $global:UpdateCurrentThreadDesktop_Func_ScriptBlock
+                    "GetCurrentThreadDesktopName_Func_ScriptBlock" = $global:GetCurrentThreadDesktopName_Func_ScriptBlock
+                    "GetInputDesktopName_Func_ScriptBlock" = $global:GetInputDesktopName_Func_ScriptBlock
+                    "GetUserObjectInformation_Func_ScriptBlock" = $global:GetUserObjectInformation_Func_ScriptBlock
+                    "HandleInputEvent_ScriptBlock" = $global:HandleInputEvent_ScriptBlock
                 }
             )
         )
