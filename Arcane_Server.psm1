@@ -159,14 +159,6 @@ Add-Type @"
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool LockWorkStation();
 
-        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        public static extern IntPtr OpenDesktop(
-            string lpszDesktop,
-            uint dwFlags,
-            bool fInherit,
-            uint dwDesiredAccess
-        );
-
         [DllImport("user32.dll", SetLastError=true, CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool GetUserObjectInformation(
@@ -315,10 +307,6 @@ Add-Type @"
 
 $global:WinAPI_Const_ScriptBlock = {
     $GENERIC_ALL = 0x10000000
-
-    $VK_LWIN = 0x5B;
-    $KEYEVENTF_KEYDOWN = 0x0;
-    $KEYEVENTF_KEYUP = 0x2;
 }
 
 # -------------------------------------------------------------------------------
@@ -449,42 +437,6 @@ $global:GetCurrentThreadDesktopName_Func_ScriptBlock = {
         try
         {
             return Get-UserObjectInformationName -hObj $desktop
-        }
-        finally
-        {
-            $null = [User32]::CloseDesktop($desktop)
-        }
-    }
-}
-
-# -------------------------------------------------------------------------------
-
-$global:UpdateCurrentThreadDesktop_Func_ScriptBlock = {
-    function Update-CurrentThreadDesktop
-    {
-        <#
-            .SYNOPSIS
-                Updates the desktop associated with the current thread.
-
-            .PARAMETER DesktopName
-                The name of the desktop to be associated with the current thread.
-        #>
-        param(
-            [Parameter(Mandatory=$True)]
-            [string] $DesktopName
-        )
-
-        $desktop = [User32]::OpenDesktop($DesktopName, 0, $true, $GENERIC_ALL)
-        if ($desktop -eq [IntPtr]::Zero)
-        {
-            throw [WinAPIException]::New("OpenDesktop")
-        }
-        try
-        {
-            if (-not [User32]::SetThreadDesktop($desktop))
-            {
-                throw [WinAPIException]::New("SetThreadDesktop")
-            }
         }
         finally
         {
@@ -1822,123 +1774,36 @@ $global:HandleInputEvent_ScriptBlock = {
 # -------------------------------------------------------------------------------
 
 $global:IngressEventScriptBlock = {
-    if ($LogonUIAccess)
+    while ($SafeHash.SessionActive)
     {
-        $BouncedInputControl_ScriptBlock = {
-            # Important Notice: Capturing both the regular and secure desktop (e.g., LogonUI, UAC prompts)
-            # in a single process is typically not feasible. My approach for the remote desktop thread involves
-            # dynamically switching desktops, as the thread does not directly interact with the desktop and can
-            # update its desktop context. However, this method does not work with the Input Thread due to its
-            # direct interaction with the desktop, which prevents updating the thread's desktop context.
-            # To resolve this, I created an additional thread(s) (Runspace(s)) and switched it to the detected desktop.
-            # This allows interaction with the desktop without issues, with each Input thread managing its own desktop.
-            # While this method is working, it may not be optimal, future versions may explore alternatives that do
-            # not require multiple threads by avoiding methods that lock the current thread's desktop and using WinAPI's
-            # Extensive testing will be necessary to validate these potential solutions.
-            Update-CurrentThreadDesktop -DesktopName $desktopName
-
-            while ($SafeHash.SessionActive)
-            {
-                $inputEvent.WaitOne()
-
-                # Check if even concern current input desktop before popping items from the queue
-                if (Get-CurrentThreadDesktopName -eq $desktopName)
-                {
-                    $aEvent = $null
-                    while ($inputQueue.TryDequeue([ref]$aEvent)) {
-                        Invoke-InputEvent -aEvent $aEvent
-                    }
-
-                    $inputEvent.Reset()
-                }
-            }
-        }
-
-        $desktop_runspaces = @{}
-
-        $defaultDesktopName = Get-CurrentThreadDesktopName
-        $inputQueue = [System.Collections.Concurrent.ConcurrentQueue[Object]]::new()
-        $inputEvent = [System.Threading.ManualResetEvent]::new($false)
-    }
-
-    try
-    {
-        while ($SafeHash.SessionActive)
+        try
         {
-            try
-            {
-                $jsonEvent = $Reader.ReadLine()
-            }
-            catch
-            {
-                # ($_ | Out-File "c:\temp\debug.txt")
-
-                break
-            }
-
-            try
-            {
-                $aEvent = $jsonEvent | ConvertFrom-Json
-            }
-            catch { continue }
-
-            if (-not ($aEvent.PSobject.Properties.name -match "Id"))
-            { continue }
-
-            if ($LogonUIAccess)
-            {
-                $currentInputDesktopName = Get-InputDesktopName
-                if ($currentInputDesktopName -ne $defaultDesktopName)
-                {
-                    if (-not $desktop_runspaces.ContainsKey($currentInputDesktopName))
-                    {
-                        $params = @{
-                            "inputQueue" = $inputQueue
-                            "inputEvent" = $inputEvent
-                            "desktopName" = $currentInputDesktopName
-                            "SafeHash" = $SafeHash
-                            "HostSyncHash" = $HostSyncHash
-                            "Clipboard" = $Clipboard
-                        }
-
-                        $desktop_runspaces[$currentInputDesktopName] = (
-                            New-RunSpace -RunspaceApartmentState "MTA" -ScriptBlocks @(
-                                # Runspace Required Functions
-                                $global:WinAPI_Const_ScriptBlock,
-                                $global:WinAPIException_Class_ScriptBlock,
-                                $global:UpdateCurrentThreadDesktop_Func_ScriptBlock,
-                                $global:GetCurrentThreadDesktopName_Func_ScriptBlock,
-                                $global:GetUserObjectInformation_Func_ScriptBlock,
-                                $global:HandleInputEvent_ScriptBlock,
-
-                                # Runspace Entrypoint
-                                $BouncedInputControl_ScriptBlock
-                        ) -Params $params)
-                    }
-
-                    # Bounce the input event to the current input desktop (Probably Winlogon)
-                    $inputQueue.Enqueue($aEvent)
-                    $null = $inputEvent.Set()
-
-                    continue
-                }
-            }
-
-            # Handle Event in default desktop
-            Invoke-InputEvent -aEvent $aEvent
+            $jsonEvent = $Reader.ReadLine()
         }
-    }
-    finally
-    {
-        if ($LogonUIAccess)
+        catch
         {
-            foreach ($desktop_runspaces in $runspaces.Values)
-            {
-                $null = $desktop_runspaces.PowerShell.EndInvoke($desktop_runspaces.AsyncResult)
-                $desktop_runspaces.PowerShell.Runspace.Dispose()
-                $desktop_runspaces.PowerShell.Dispose()
-            }
+            # ($_ | Out-File "c:\temp\debug.txt")
+
+            break
         }
+
+        if ($logonUIAccess)
+        {
+            # Attempt to switch current thread desktop (LogonUI / Secure Desktop support)
+            Update-CurrentThreadDesktopWidthInputDesktop
+        }
+
+        try
+        {
+            $aEvent = $jsonEvent | ConvertFrom-Json
+        }
+        catch { continue }
+
+        if (-not ($aEvent.PSobject.Properties.name -match "Id"))
+        { continue }
+
+        # Handle Event in default desktop
+        Invoke-InputEvent -aEvent $aEvent
     }
 }
 
@@ -3095,16 +2960,25 @@ class ServerSession {
 
         ###
 
+        if ($this.LogonUIAccess)
+        {
+            $runspaceApartmentState = "MTA"
+        }
+        else
+        {
+            $runspaceApartmentState = "STA"
+        }
+
         $this.WorkerThreads.Add(
             (
-                New-RunSpace -ScriptBlocks @(
+                New-RunSpace -RunspaceApartmentState $runspaceApartmentState -ScriptBlocks @(
                     # Runspace Required Functions
                     $global:WinAPI_Const_ScriptBlock,
                     $global:WinAPIException_Class_ScriptBlock,
-                    $global:GetCurrentThreadDesktopName_Func_ScriptBlock,
-                    $global:GetInputDesktopName_Func_ScriptBlock,
                     $global:GetUserObjectInformation_Func_ScriptBlock,
-                    $global:NewRunSpace_Func_ScriptBlock,
+                    $global:GetInputDesktopName_Func_ScriptBlock,
+                    $global:GetCurrentThreadDesktopName_Func_ScriptBlock,
+                    $global:UpdateCurrentThreadDesktopWithInputDesktop_Func_ScriptBlock,
                     $global:HandleInputEvent_ScriptBlock,
 
                     # Runspace Entrypoint
@@ -3116,15 +2990,6 @@ class ServerSession {
                     "Clipboard" = $this.Clipboard
                     "SafeHash" = $this.SafeHash
                     "LogonUIAccess" = $this.logonUIAccess
-
-                    # Required Script Blocks (LogonUIAccess)
-                    "WinAPI_Const_ScriptBlock" = $global:WinAPI_Const_ScriptBlock
-                    "WinAPIException_Class_ScriptBlock" = $global:WinAPIException_Class_ScriptBlock
-                    "UpdateCurrentThreadDesktop_Func_ScriptBlock" = $global:UpdateCurrentThreadDesktop_Func_ScriptBlock
-                    "GetCurrentThreadDesktopName_Func_ScriptBlock" = $global:GetCurrentThreadDesktopName_Func_ScriptBlock
-                    "GetInputDesktopName_Func_ScriptBlock" = $global:GetInputDesktopName_Func_ScriptBlock
-                    "GetUserObjectInformation_Func_ScriptBlock" = $global:GetUserObjectInformation_Func_ScriptBlock
-                    "HandleInputEvent_ScriptBlock" = $global:HandleInputEvent_ScriptBlock
                 }
             )
         )
