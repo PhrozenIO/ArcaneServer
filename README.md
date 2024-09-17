@@ -35,11 +35,45 @@ Invoke-ArcaneServer
 
 That's it, you're ready to go! 🚀
 
+## Capture LogonUI / UAC (Secure Desktop)
+
+Starting with version `1.0.5` of Arcane Server, **Secure Desktop** is fully supported using just a single instance of the server. This enhancement allows you to log in to your computer directly from Arcane or respond to UAC (User Account Control) prompts. This feature is crucial for those who wish to use Arcane as a day-to-day remote desktop application.
+
+In the near future, I will publish an article detailing how I implemented this feature without relying on third-party services, unlike other remote desktop applications.
+
+To support **Secure Desktop** capture, the Server must be run as an Interactive **NT/Authority SYSTEM** process. "Interactive" means a SYSTEM process that has access to the active desktop session you wish to capture. Tools like **PsExec** can facilitate this by spawning a separate interactive process as SYSTEM. However, PsExec can sometimes be flagged as malicious, as it's frequently used by threat actors and red teamers.
+
+Fortunately, a few years ago, I developed a PowerShell script called [PowerRunAsSystem](https://github.com/PhrozenIO/PowerRunAsSystem). This script allows you to spawn an interactive SYSTEM process using only native Windows functions, without relying on external tools. You can install **PowerRunAsSystem** directly via the PowerShell Gallery:
+
+> ⚠️ Please note that you must have administrative privileges to install a new PowerShell module.
+
+```powershell
+Install-Module -Name PowerRunAsSystem
+```
+
+In the same PowerShell session or a new one with administrative privileges, import the newly installed module using:
+
+> ⓘ depending on your system configuration, you may need to run the following command to temporarily bypass the execution policy in order to run an unsigned script:
+> `powershell.exe -executionpolicy bypass`
+
+```powershell
+Import-Module PowerRunAsSystem
+```
+
+Now you can call:
+
+```powershell
+ Invoke-InteractiveSystemPowerShell
+```
+
+A new PowerShell command prompt should open with SYSTEM privileges. You can verify this by running the command `whoami`. From this prompt, you can now start your Arcane Server as you would in a regular prompt. When Arcane Server is run under the SYSTEM user account, it automatically detects this and enables Secure Desktop interaction capabilities.
+
 ## Version Table
 
-| Version         | Protocol Version | Release Date    | 
-|-----------------|------------------|-----------------|
-| 1.0.4           | 5.0.1            | 15 August 2024  | 
+| Version         | Protocol Version | Release Date      | 
+|-----------------|------------------|-------------------|
+| 1.0.4           | 5.0.1            | 15 August 2024    | 
+| 1.0.5           | 5.0.2            | 17 September 2024 |
 
 ## Advanced Usage
 
@@ -125,3 +159,22 @@ base64 -i /tmp/phrozen.p12
 
 You can then pass the output base64 certificate file to parameter `EncodedCertificate` (One line)
 
+## Changelog
+
+## Version 1.0.5
+
+- [x] **Dynamic Resolution/Scaling Update Support:** When the remote display resolution or HDPI scaling settings change, the viewer is notified and automatically updates the current window to accommodate the new display constraints.
+- [x] **Secure Desktop (Automatic Desktop Context Switching)** is now fully supported for both Desktop Streaming and Input (Keyboard, Mouse, Outgoing Clipboard). To capture Secure Desktop, Arcane Server must be run as an Interactive `SYSTEM` user. You can use `PsExec` or `PowerRunAsSystem` to achieve this. This feature is crucial for logging into a remote user account when the session is locked or for accepting or rejecting UAC prompts.
+- [x] **Keyboard Simulation Enhancement:** Keyboard simulation has been improved by moving from .NET to the pure Windows API `SendInput` for simulating both individual key inputs and shortcuts. This transition offers several advantages: it supports a broader range of applications and windows (all) and it simplifies the detection and switching of Secure Desktop updates.
+- [x] **New Shortcuts Supported:** Arcane now supports additional keyboard shortcuts, including `CTRL+[A-Z]` and `ALT+[F1-F16]`. The Windows key (Meta Key) is also supported. The shortcut for locking the workstation, `WIN + L`, has been added.
+- [x] **Optimizations and Enhancements:** This update includes multiple optimizations, cleaner code, and improved presentation mode handling. In presentation mode (view only), event threads are no longer required for both the viewer and the server.
+
+## Special Thanks
+
+* [Mudpak (Mudsor MASOOD)](https://www.linkedin.com/in/mudsormasood/) - Official Beta / Quality Tester
+
+Additionally, I extend my gratitude to those who contributed to enhancing the project's visibility:
+
+* [Laurent Minne](https://www.linkedin.com/in/laurent-minne/)
+
+*If you share Arcane with your community, please feel free to contact me to be recognized in this section. I am very grateful to those who contribute by sharing my research and projects.*

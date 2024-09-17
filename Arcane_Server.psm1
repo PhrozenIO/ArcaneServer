@@ -1,7 +1,7 @@
 <#-------------------------------------------------------------------------------
 
     Arcane :: Server
-    
+
     .Developer
         Jean-Pierre LESUEUR (@DarkCoderSc)
         https://www.twitter.com/darkcodersc
@@ -15,80 +15,222 @@
         Apache License
         Version 2.0, January 2004
         http://www.apache.org/licenses/
-        
+
+    .Disclaimer
+        This script is provided "as is", without warranty of any kind, express or
+        implied, including but not limited to the warranties of merchantability,
+        fitness for a particular purpose and noninfringement. In no event shall the
+        authors or copyright holders be liable for any claim, damages or other
+        liability, whether in an action of contract, tort or otherwise, arising
+        from, out of or in connection with the software or the use or other dealings
+        in the software.
+
+    .Notice
+        Writing the entire code in a single PowerShell script is wished,
+        allowing it to function both as a module or a standalone script.
+
 -------------------------------------------------------------------------------#>
+
+# ----------------------------------------------------------------------------- #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+#  Global Variables                                                             #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+# ----------------------------------------------------------------------------- #
+
+$global:ArcaneVersion = "1.0.5"
+$global:ArcaneProtocolVersion = "5.0.2"
+
+$global:HostSyncHash = [HashTable]::Synchronized(@{
+    host = $host
+    ClipboardText = (Get-Clipboard -Raw)
+})
+
+# ----------------------------------------------------------------------------- #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+#  Enums Definitions                                                            #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+# ----------------------------------------------------------------------------- #
+
+enum ClipboardMode {
+    Disabled = 1
+    Receive = 2
+    Send = 3
+    Both = 4
+}
+
+enum ProtocolCommand {
+    Success = 1
+    Fail = 2
+    RequestSession = 3
+    AttachToSession = 4
+    BadRequest = 5
+    ResourceFound = 6
+    ResourceNotFound = 7
+}
+
+enum WorkerKind {
+    Desktop = 1
+    Events = 2
+}
+
+enum LogKind {
+    Information
+    Warning
+    Success
+    Error
+}
+
+# ----------------------------------------------------------------------------- #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+#  Windows API Definitions                                                      #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+# ----------------------------------------------------------------------------- #
 
 Add-Type -Assembly System.Windows.Forms
 
 Add-Type @"
-    using System;    
+    using System;
     using System.Security;
     using System.Runtime.InteropServices;
 
-    public static class User32 
+    public static class User32
     {
-        [DllImport("User32.dll")] 
-        public static extern bool SetProcessDPIAware();    
+        [DllImport("user32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool OpenClipboard(IntPtr hWndNewOwner);
 
-        [DllImport("User32.dll")] 
-        public static extern int LoadCursorA(int hInstance, int lpCursorName);
+        [DllImport("user32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool CloseClipboard();
 
-        [DllImport("User32.dll")] 
+        [DllImport("user32.dll", SetLastError=true)]
+        public static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
+
+        [DllImport("user32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool EmptyClipboard();
+
+        [DllImport("User32.dll", SetLastError=false)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetProcessDPIAware();
+
+        [DllImport("User32.dll", SetLastError=false)]
+        [return: MarshalAs(UnmanagedType.U4)]
+        public static extern uint LoadCursorA(int hInstance, int lpCursorName);
+
+        [DllImport("User32.dll", SetLastError=false)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool GetCursorInfo(IntPtr pci);
 
-        [DllImport("user32.dll")] 
-        public static extern void mouse_event(int flags, int dx, int dy, int cButtons, int info);            
+        [DllImport("user32.dll", SetLastError=false)]
+        public static extern void mouse_event(int flags, int dx, int dy, int cButtons, int info);
 
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.U4)]
         public static extern int GetSystemMetrics(int nIndex);
 
-        [DllImport("User32.dll")] 
-        public static extern IntPtr GetWindowDC(IntPtr hWnd);
-
-        [DllImport("User32.dll")] 
+        [DllImport("User32.dll", SetLastError=false)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool ReleaseDC(IntPtr hWnd, IntPtr hDC);
 
-        [DllImport("user32.dll")]
-        public static extern IntPtr GetDesktopWindow();
+        [DllImport("user32.dll", SetLastError=false)]
+        public static extern IntPtr GetDC(IntPtr hWnd);
 
-        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-        public static extern IntPtr OpenDesktop(
-            [MarshalAs(UnmanagedType.LPTStr)] string DesktopName,
-            uint Flags,
-            bool Inherit,
-            uint Access
+        [DllImport("user32.dll", SetLastError=true)]
+        public static extern IntPtr OpenInputDesktop(
+            uint dwFlags,
+            bool fInherit,
+            uint dwDesiredAccess
         );
 
         [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool LockWorkStation();
+
+        [DllImport("user32.dll", SetLastError=true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetUserObjectInformation(
+            IntPtr hObj,
+            int nIndex,
+            IntPtr pvInfo,
+            uint nLength,
+            ref uint lpnLengthNeeded
+        );
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool CloseDesktop(
+            IntPtr hDesktop
+        );
+
+        [DllImport("user32.dll", SetLastError=true)]
+        public static extern IntPtr GetThreadDesktop(uint dwThreadId);
+
+        [DllImport("user32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool SetThreadDesktop(
             IntPtr hDesktop
         );
 
         [DllImport("user32.dll", SetLastError = true)]
-        public static extern bool CloseDesktop(
-            IntPtr hDesktop
-        );    
-
-        [DllImport("user32.dll", SetLastError = true)]
-        public static extern IntPtr GetForegroundWindow();
-    }    
+        [return: MarshalAs(UnmanagedType.U4)]
+        public static extern uint SendInput(
+            uint nInputs,
+            IntPtr pInputs,
+            int cbSize
+        );
+    }
 
     public static class Kernel32
     {
-        [DllImport("Kernel32.dll")] 
+        [DllImport("kernel32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GlobalUnlock(IntPtr hMem);
+
+        [DllImport("Kernel32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.U4)]
         public static extern uint SetThreadExecutionState(uint esFlags);
 
-        [DllImport("kernel32.dll", SetLastError = true, EntryPoint="RtlMoveMemory"), SuppressUnmanagedCodeSecurity]
+        [DllImport("kernel32.dll", SetLastError=false, EntryPoint="RtlMoveMemory"), SuppressUnmanagedCodeSecurity]
         public static extern void CopyMemory(
             IntPtr dest,
             IntPtr src,
             IntPtr count
-        );        
+        );
+
+        [DllImport("kernel32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.U4)]
+        public static extern uint GetCurrentThreadId();
+
+        [DllImport("kernel32.dll", SetLastError=true, CharSet = CharSet.Unicode)]
+        public static extern IntPtr LoadLibrary(string lpFileName);
+
+        [DllImport("kernel32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool FreeLibrary(IntPtr hModule);
+
+        [DllImport("kernel32.dll", SetLastError=true, CharSet = CharSet.Ansi)]
+        public static extern IntPtr GetProcAddress(
+            IntPtr hModule,
+            string procName
+        );
     }
 
     public static class MSVCRT
     {
-        [DllImport("msvcrt.dll", CallingConvention=CallingConvention.Cdecl), SuppressUnmanagedCodeSecurity]
+        [DllImport("msvcrt.dll", SetLastError=false, CallingConvention=CallingConvention.Cdecl), SuppressUnmanagedCodeSecurity]
         public static extern IntPtr memcmp(
             IntPtr p1,
             IntPtr p2,
@@ -104,7 +246,8 @@ Add-Type @"
         [DllImport("gdi32.dll")]
         public static extern IntPtr DeleteObject(IntPtr hDc);
 
-        [DllImport("gdi32.dll"), SuppressUnmanagedCodeSecurity]
+        [DllImport("gdi32.dll", SetLastError=false), SuppressUnmanagedCodeSecurity]
+        [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool BitBlt(
             IntPtr hdcDest,
             int xDest,
@@ -117,7 +260,7 @@ Add-Type @"
             int RasterOp
         );
 
-        [DllImport("gdi32.dll")]
+        [DllImport("gdi32.dll", SetLastError=false)]
         public static extern IntPtr CreateDIBSection(
             IntPtr hdc,
             IntPtr pbmi,
@@ -138,69 +281,1790 @@ Add-Type @"
         public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
 
         [DllImport ("gdi32.dll")]
-        public static extern IntPtr SelectObject(IntPtr hdc, IntPtr bmp); 
+        public static extern IntPtr SelectObject(IntPtr hdc, IntPtr bmp);
+
+        [DllImport ("gdi32.dll")]
+        [return: MarshalAs(UnmanagedType.U4)]
+        public static extern int GetDeviceCaps(IntPtr hdc, int nIndex);
+    }
+
+    public static class Shcore {
+        [DllImport("Shcore.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.U4)]
+        public static extern uint SetProcessDpiAwareness(uint value);
     }
 "@
 
-$global:ArcaneVersion = "1.0.4"
-$global:ArcaneProtocolVersion = "5.0.1"
+# ----------------------------------------------------------------------------- #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+#  Script Blocks                                                                #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+# ----------------------------------------------------------------------------- #
 
-$global:HostSyncHash = [HashTable]::Synchronized(@{
-    host = $host
-    ClipboardText = (Get-Clipboard -Raw)    
-})
-
-enum ClipboardMode {
-    Disabled = 1
-    Receive = 2
-    Send = 3
-    Both = 4
+$global:WinAPI_Const_ScriptBlock = {
+    $GENERIC_ALL = 0x10000000
 }
 
-enum ProtocolCommand {
-    Success = 1
-    Fail = 2
-    RequestSession = 3
-    AttachToSession = 4
-    BadRequest = 5
-    ResourceFound = 6
-    ResourceNotFound = 7
-    LogonUIAccessDenied = 8
-    LogonUIWrongSession = 9
+# -------------------------------------------------------------------------------
+
+$global:WinAPIException_Class_ScriptBlock = {
+    class WinAPIException: System.Exception
+    {
+        WinAPIException([string] $ApiName) : base (
+            [string]::Format(
+                "WinApi Exception -> {0}, LastError: {1}",
+                $ApiName,
+                [System.Runtime.InteropServices.Marshal]::GetLastWin32Error().ToString()
+            )
+        )
+        {}
+    }
 }
 
-enum WorkerKind {
-    Desktop = 1
-    Events = 2
+# -------------------------------------------------------------------------------
+
+$global:GetUserObjectInformation_Func_ScriptBlock = {
+    function Get-UserObjectInformationName
+    {
+        <#
+            .SYNOPSIS
+                Retrieves the name of the specified object.
+
+            .PARAMETER hObj
+                A handle to the object.
+        #>
+        param (
+            [Parameter(Mandatory = $true)]
+            [IntPtr]$hObj
+        )
+
+        $pvInfo = [IntPtr]::Zero
+        try
+        {
+            $lpnLengthNeeded = [UInt32]0
+
+            $UOI_NAME = 0x2
+            $null = [User32]::GetUserObjectInformation(
+                $hObj,
+                $UOI_NAME,
+                [IntPtr]::Zero,
+                0,
+                [ref]$lpnLengthNeeded
+            )
+
+            if ($lpnLengthNeeded -eq 0)
+            {
+                throw [WinAPIException]::New("GetUserObjectInformation(1)")
+            }
+
+            $pvInfo = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($lpnLengthNeeded)
+
+            $b = [User32]::GetUserObjectInformation(
+                $desktop,
+                $UOI_NAME,
+                $pvInfo,
+                $lpnLengthNeeded,
+                [ref]$lpnLengthNeeded
+            )
+
+            if ($b -eq $false)
+            {
+                throw [WinAPIException]::New("GetUserObjectInformation(2)")
+            }
+
+            return [System.Runtime.InteropServices.Marshal]::PtrToStringUni($pvInfo)
+        }
+        finally
+        {
+            if ($pvInfo -ne [IntPtr]::Zero)
+            {
+                [System.Runtime.InteropServices.Marshal]::FreeHGlobal($pvInfo)
+            }
+        }
+
+        return $objectName
+    }
 }
 
-enum LogKind {
-    Information
-    Warning
-    Success
-    Error
+# -------------------------------------------------------------------------------
+
+$global:GetInputDesktopName_Func_ScriptBlock = {
+    function Get-InputDesktopName
+    {
+        <#
+            .SYNOPSIS
+                Retrieves the name of the input desktop (Desktop that receive input).
+        #>
+        $desktop = [IntPtr]::Zero
+        try
+        {
+            $desktop = [User32]::OpenInputDesktop(0, $false, $GENERIC_ALL)
+            if ($desktop -eq [IntPtr]::Zero)
+            {
+                throw [WinAPIException]::New("OpenInputDesktop")
+            }
+
+            return Get-UserObjectInformationName -hObj $desktop
+        }
+        finally
+        {
+            if ($desktop -ne [IntPtr]::Zero)
+            {
+                $null = [User32]::CloseDesktop($desktop)
+            }
+        }
+    }
 }
 
-enum BlockSize {
-    Size32 = 32
-    Size64 = 64
-    Size96 = 96
-    Size128 = 128
-    Size256 = 256
-    Size512 = 512
+# -------------------------------------------------------------------------------
+
+$global:GetCurrentThreadDesktopName_Func_ScriptBlock = {
+    function Get-CurrentThreadDesktopName
+    {
+        <#
+            .SYNOPSIS
+                Retrieves the name of the desktop associated with the current thread.
+        #>
+        $desktop = [User32]::GetThreadDesktop([Kernel32]::GetCurrentThreadId())
+        if ($desktop -eq [IntPtr]::Zero)
+        {
+            throw [WinAPIException]::New("GetThreadDesktop")
+        }
+        try
+        {
+            return Get-UserObjectInformationName -hObj $desktop
+        }
+        finally
+        {
+            $null = [User32]::CloseDesktop($desktop)
+        }
+    }
 }
 
-enum PacketSize {
-    Size1024 = 1024
-    Size2048 = 2048
-    Size4096 = 4096
-    Size8192 = 8192
-    Size9216 = 9216
-    Size12288 = 12288
-    Size16384 = 16384
+# -------------------------------------------------------------------------------
+
+$global:UpdateCurrentThreadDesktopWithInputDesktop_Func_ScriptBlock = {
+    function Update-CurrentThreadDesktopWidthInputDesktop()
+    {
+        <#
+            .SYNOPSIS
+                Updates the desktop associated with the current thread if input desktop changed.
+
+            .DESCRIPTION
+                Exceptions are catched and ignored.
+        #>
+        try
+        {
+            $currentThreadDesktopName = Get-CurrentThreadDesktopName
+            $inputDesktopName = Get-InputDesktopName
+
+            if ($currentThreadDesktopName -ne "" -and $inputDesktopName -ne "" -and $currentThreadDesktopName -ne $inputDesktopName)
+            {
+                $desktop = [User32]::OpenInputDesktop(0, $true,  $GENERIC_ALL)
+                if ($desktop -eq [IntPtr]::Zero)
+                {
+                    throw [WinAPIException]::New("OpenInputDesktop")
+                }
+                try
+                {
+                    return [User32]::SetThreadDesktop($desktop)
+                }
+                finally {
+                    $null = [User32]::CloseDesktop($desktop)
+                }
+            }
+        }
+        catch {}
+        return $false
+    }
 }
 
-function Write-Banner 
+# -------------------------------------------------------------------------------
+
+$global:NewRunSpace_Func_ScriptBlock = {
+    function New-RunSpace
+    {
+        <#
+            .SYNOPSIS
+                Create a new PowerShell Runspace.
+
+            .DESCRIPTION
+                Notice: the $host variable is used for debugging purpose to write on caller PowerShell
+                Terminal.
+
+            .PARAMETER ScriptBlocks
+                Type: ScriptBlock[]
+                Default: None
+                Description: Instructions to execute in new runspace. Runspace can be composed of one or
+                multiple script blocks.
+
+            .PARAMETER Params
+                Type: Hashtable
+                Default: None
+                Description: Hashtable containing parameters to pass to the runspace.
+
+            .PARAMETER RunspaceApartmentState
+                Type: String
+                Default: "STA"
+                Description: The apartment state of the runspace (Single, Multi).
+        #>
+        param(
+            [Parameter(Mandatory=$True)]
+            [ScriptBlock[]] $ScriptBlocks,
+
+            [Hashtable]$Params = @{},
+
+            [ValidateSet("STA", "MTA")]
+            [string]$RunspaceApartmentState = "STA"
+        )
+
+        $runspace = [RunspaceFactory]::CreateRunspace()
+        $runspace.ThreadOptions = "UseNewThread"
+        $runspace.ApartmentState = $RunspaceApartmentState
+        $runspace.Open()
+
+        if ($Params.Count -gt 0)
+        {
+            foreach ($key in $Params.Keys)
+            {
+                $runspace.SessionStateProxy.SetVariable(
+                    $key,
+                    $Params[$key]
+                )
+            }
+        }
+
+        $powershell = [PowerShell]::Create()
+
+        foreach ($scriptBlock in $ScriptBlocks)
+        {
+            $null = $powershell.AddScript($scriptBlock)
+        }
+
+        $powershell.Runspace = $runspace
+
+        $asyncResult = $powershell.BeginInvoke()
+
+        return New-Object PSCustomObject -Property @{
+            Runspace = $runspace
+            PowerShell = $powershell
+            AsyncResult = $asyncResult
+        }
+    }
+}
+. $NewRunSpace_Func_ScriptBlock
+
+# -------------------------------------------------------------------------------
+
+$global:DesktopStreamScriptBlock = {
+    function Update-ScreensInformation
+    {
+        <#
+            .SYNOPSIS
+                Update screens information (force update).
+
+            .DESCRIPTION
+                (
+                    PowerShell <= 5.1 -> Confirmed
+                    PowerShell >= 6.0 <= 7.0 -> Untested
+                    PowerShell >= 7.0 -> Seems to be fixed
+                )
+                It appears that a long-standing bug (PS < 7.0) affects the display resolution and screen count updates.
+                Specifically, display information seems to be cached and is not refreshed until a new PowerShell session
+                is started. This issue can be quite inconvenient. One potential solution would be to reimplement the
+                display management logic using the Windows API directly.
+
+                Given that the goal is to leverage PowerShell as much as possible, I've opted for a workaround that
+                involves patching the internal state of the Screen class. By setting the screens field to null in memory,
+                the next access to display information will force a refresh and provide updated screen data. This method,
+                while somewhat "hacky", allows us to avoid extensive changes and keep the solution within the PowerShell
+                environment.
+        #>
+        try
+        {
+            # PowerShell >= 7.0, issue seems to be fixed
+            if ($PSVersionTable.PSVersion.Major -ge 7)
+            {
+                return
+            }
+
+            # Patch memory to force screen information to update (cache killer)
+            ([System.Windows.Forms.Screen].GetField(
+                    "screens",
+                    [System.Reflection.BindingFlags]::Static -bor [System.Reflection.BindingFlags]::NonPublic
+            )).SetValue($null, $null)
+        } catch {}
+    }
+
+    function Get-Screens
+    {
+        Update-ScreensInformation
+
+        return ([System.Windows.Forms.Screen]::AllScreens | Sort-Object -Property Primary -Descending)
+    }
+
+    function ConvertTo-ScreenObject
+    {
+        <#
+            .SYNOPSIS
+                Take a .NET Screen and convert to Arcane Screen object.
+
+            .PARAMETER ScreenName
+                Type: String
+                Default: None
+                Description: .NET Screen object to be converted.
+        #>
+        param (
+            [Parameter(Mandatory = $true)]
+            [System.Windows.Forms.Screen]$screen
+        )
+
+        return New-Object -TypeName PSCustomObject -Property @{
+            Id = $i
+            Name = $screen.DeviceName
+            Primary = $screen.Primary
+            Width = $screen.Bounds.Width
+            Height = $screen.Bounds.Height
+            X = $screen.Bounds.X
+            Y = $screen.Bounds.Y
+        }
+    }
+
+    function Get-ScreenObjectList
+    {
+        <#
+            .SYNOPSIS
+                Return an array of screen objects.
+
+            .DESCRIPTION
+                A screen refer to physical or virtual screen (monitor).
+
+        #>
+        $result = @()
+
+        $i = 0
+        foreach ($screen in (Get-Screens))
+        {
+            $i++
+
+            $result += (ConvertTo-ScreenObject -screen $screen)
+        }
+
+        return ,$result
+    }
+
+    function Compare-ScreenInformation
+    {
+        <#
+            .SYNOPSIS
+                Compare two screen objects.
+
+            .DESCRIPTION
+                Compare two screen objects and return true if they are different.
+
+            .PARAMETER screenToCompare
+                Type: System.Windows.Forms.Screen
+                Default: None
+                Description: Screen object to compare with updated and matching screen object.
+        #>
+        param (
+            [Parameter(Mandatory = $true)]
+            [System.Windows.Forms.Screen]$screenToCompare
+        )
+
+        $screens = (Get-Screens | Sort-Object -Property Primary -Descending)
+        $screen = $screens | Where-Object { $_.DeviceName -eq $screenToCompare.DeviceName }
+
+        if (-not $screen)
+        {
+            return $true
+        }
+
+        return (
+            $screen.Bounds.Width -ne $screenToCompare.Bounds.Width -or
+            $screen.Bounds.Height -ne $screenToCompare.Bounds.Height -or
+            $screen.Bounds.X -ne $screenToCompare.Bounds.X -or
+            $screen.Bounds.Y -ne $screenToCompare.Bounds.Y
+        )
+    }
+
+    $mirrorDesktop_DC = [IntPtr]::Zero
+    $desktop_DC = [IntPtr]::Zero
+    $mirrorDesktop_hBmp = [IntPtr]::Zero
+    $spaceBlock_DC = [IntPtr]::Zero
+    $spaceBlock_hBmp = [IntPtr]::Zero
+    $dirtyRect_DC = [IntPtr]::Zero
+    $pBitmapInfoHeader = [IntPtr]::Zero
+
+    $SRCCOPY = 0x00CC0020
+    $DIB_RGB_COLORS = 0x0
+    try
+    {
+        $screens = New-Object PSCustomObject -Property @{
+            List = (Get-ScreenObjectList)
+        }
+        $Client.WriteJson($screens)
+
+        $screen = $null
+
+        $viewerExpectation = $Client.ReadLine() | ConvertFrom-Json
+
+        if ($viewerExpectation.PSobject.Properties.name -contains "ScreenName")
+        {
+            $screen = (Get-Screens) | Where-Object -FilterScript {
+                $_.DeviceName -eq $viewerExpectation.ScreenName
+            }
+
+            # Add other parameters if needed
+        }
+
+        if (-not $screen)
+        {
+            $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+            if (-not $screen)
+            {
+                return
+            }
+        }
+
+        # Default
+        $blockSize = 64
+        $packetSize = 4096
+        $compressionQuality = 100
+
+        # User-defined (Optional)
+        if ($viewerExpectation.PSobject.Properties.name -contains "BlockSize")
+        {
+            $blockSize = $viewerExpectation.BlockSize
+        }
+
+        if ($viewerExpectation.PSobject.Properties.name -contains "PacketSize")
+        {
+            $packetSize = $viewerExpectation.PacketSize
+        }
+
+        if ($viewerExpectation.PSobject.Properties.name -contains "ImageCompressionQuality")
+        {
+            $compressionQuality = $viewerExpectation.ImageCompressionQuality
+        }
+
+        $encoderParameters = New-Object System.Drawing.Imaging.EncoderParameters(1)
+        $encoderParameters.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
+            [System.Drawing.Imaging.Encoder]::Quality,
+            $compressionQuality
+        )
+
+        $encoder = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' };
+
+        $collapsed = $false
+
+        while ($SafeHash.SessionActive)
+        {
+            if ($collapsed)
+            {
+                break
+            }
+
+            $SpaceGrid = $null
+            try
+            {
+                $firstIteration = $true
+
+                # Create our desktop mirror (For speeding up BitBlt calls)
+                $screenBounds = $screen.Bounds
+
+                $horzBlockCount = [math]::ceiling($screenBounds.Width / $blockSize)
+                $vertBlockCount = [math]::ceiling($screenBounds.Height / $blockSize)
+
+                $SpaceGrid = New-Object IntPtr[][] $vertBlockCount, $horzBlockCount
+
+                [IntPtr] $desktop_DC = [User32]::GetDC([IntPtr]::Zero)
+                [IntPtr] $mirrorDesktop_DC = [GDI32]::CreateCompatibleDC($desktop_DC)
+
+                [IntPtr] $mirrorDesktop_hBmp = [GDI32]::CreateCompatibleBitmap(
+                    $desktop_DC,
+                    $screenBounds.Width,
+                    $screenBounds.Height
+                )
+
+                $null = [GDI32]::SelectObject($mirrorDesktop_DC, $mirrorDesktop_hBmp)
+
+                # Create our block of space for change detection
+
+                <#
+                    typedef struct tagBITMAPINFOHEADER {
+                        // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x0
+                        DWORD biSize;
+
+                        // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x4
+                        LONG  biWidth;
+
+                        // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x8
+                        LONG  biHeight;
+
+                        // x86-32|64: 0x2 Bytes | Padding = 0x0 | Offset: 0xc
+                        WORD  biPlanes;
+
+                        // x86-32|64: 0x2 Bytes | Padding = 0x0 | Offset: 0xe
+                        WORD  biBitCount;
+
+                        // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x10
+                        DWORD biCompression;
+
+                        // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x14
+                        DWORD biSizeImage;
+
+                        // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x18
+                        LONG  biXPelsPerMeter;
+
+                        // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x1c
+                        LONG  biYPelsPerMeter;
+
+                        // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x20
+                        DWORD biClrUsed;
+
+                        // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x24
+                        DWORD biClrImportant;
+                    } BITMAPINFOHEADER, *LPBITMAPINFOHEADER, *PBITMAPINFOHEADER;
+
+                    // x86-32|64 Struct Size: 0x28 (40 Bytes)
+                    // BITMAPINFO = BITMAPINFOHEADER (0x28) + RGBQUAD (0x4) = 0x2c
+                #>
+
+                $bitmapInfoHeaderSize = 0x28
+                $bitmapInfoSize = $bitmapInfoHeaderSize + 0x4
+
+                $pBitmapInfoHeader = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($bitmapInfoSize)
+
+                # ZeroMemory
+                for ($i = 0; $i -lt $bitmapInfoSize; $i++)
+                {
+                    [System.Runtime.InteropServices.Marshal]::WriteByte($pBitmapInfoHeader, $i, 0x0)
+                }
+
+                $BITSPIXEL = 12
+                $PLANES = 14
+                $biBitCount = [GDI32]::GetDeviceCaps($mirrorDesktop_DC, $BITSPIXEL)
+                $biPlanes = [GDI32]::GetDeviceCaps($mirrorDesktop_DC, $PLANES)
+
+                [System.Runtime.InteropServices.Marshal]::WriteInt32($pBitmapInfoHeader, 0x0, $bitmapInfoHeaderSize) # biSize
+                [System.Runtime.InteropServices.Marshal]::WriteInt32($pBitmapInfoHeader, 0x4, $blockSize) # biWidth
+                [System.Runtime.InteropServices.Marshal]::WriteInt32($pBitmapInfoHeader, 0x8, $blockSize) # biHeight
+                [System.Runtime.InteropServices.Marshal]::WriteInt16($pBitmapInfoHeader, 0xc, $biPlanes) # biPlanes
+                [System.Runtime.InteropServices.Marshal]::WriteInt16($pBitmapInfoHeader, 0xe, $biBitCount) # biBitCount
+
+                [IntPtr] $spaceBlock_DC = [GDI32]::CreateCompatibleDC(0)
+                [IntPtr] $spaceBlock_Ptr = [IntPtr]::Zero
+
+                [IntPtr] $spaceBlock_hBmp = [GDI32]::CreateDIBSection(
+                    $spaceBlock_DC,
+                    $pBitmapInfoHeader,
+                    $DIB_RGB_COLORS,
+                    [ref] $spaceBlock_Ptr,
+                    [IntPtr]::Zero,
+                    0
+                )
+
+                $null = [GDI32]::SelectObject($spaceBlock_DC, $spaceBlock_hBmp)
+
+                # Create our dirty rect DC
+                $dirtyRect_DC = [GDI32]::CreateCompatibleDC(0)
+
+                # Field      | Type  | Size | Offset
+                # ----------------------------------
+                # Chunk Size | DWORD | 0x4  | 0x0
+                # Left       | DWORD | 0x4  | 0x4
+                # Top        | DWORD | 0x4  | 0x8
+                # ScreenUpd  | BYTE  | 0x1  | 0xc
+                # ----------------------------------
+                # Total Size : 0xd (13 Bytes)
+                $struct = New-Object -TypeName byte[] -ArgumentList 13
+
+                $topLeftBlock = [System.Drawing.Point]::Empty
+                $bottomRightBlock = [System.Drawing.Point]::Empty
+
+                $blockMemSize = ((($blockSize * $biBitCount) + $biBitCount) -band -bnot $biBitCount) / 8
+                $blockMemSize *= $blockSize
+                $ptrBlockMemSize = [IntPtr]::New($blockMemSize)
+
+                $dirtyRect = New-Object -TypeName System.Drawing.Rectangle -ArgumentList 0, 0, $screenBounds.Width, $screenBounds.Height
+
+                <#
+                $fps = 0
+                $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
+                #>
+
+                while ($SafeHash.SessionActive)
+                {
+                    if ($logonUIAccess)
+                    {
+                        $updated = Update-CurrentThreadDesktopWidthInputDesktop
+                        if ($updated)
+                        {
+                            # Respawn a new desktop mirror (Winlogon or Default)
+
+                            break
+                        }
+                    }
+
+                    if (Compare-ScreenInformation -screenToCompare $screen)
+                    {
+                        $screen = Get-Screens | Where-Object { $_.DeviceName -eq $screen.DeviceName }
+                        if (-not $screen)
+                        {
+                            # If we cannot find the screen, we fallback to primary screen
+                            $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+                            if (-not $screen)
+                            {
+                                return
+                            }
+                        }
+
+                        # Only set offset `0xc` to true (ScreenUpdated). Other existing structure members will be ignored by
+                        # the viewer.
+                        # This is a way to tell the viewer that the screen has been updated and receive new screen information.
+                        [System.Runtime.InteropServices.Marshal]::WriteByte($struct, 0xc, 0x1)
+
+                        $Client.SSLStream.Write($struct , 0, $struct.Length)
+
+                        # Send new screen information to the viewer
+                        $Client.WriteJson((ConvertTo-ScreenObject -screen $screen))
+
+                        # Respawn a new desktop mirror
+                        break
+                    }
+
+                    $CAPTUREBLT = 0x40000000
+
+                    # Refresh our desktop mirror (Overhead is located here)
+                    # It might seems confusing, but in some scenarios, mirroring the desktop is faster than capturing the desktop directly
+                    # for each screen block. In modern Windows, this does not seems to be the case anymore but for retro-compatibility, I
+                    # decided to keep this method until I can confirm that it is no longer necessary (or offer it as a default option).
+                    # Notice that getting rid of this BitBlt call, would considerably improve performance (almost twice)
+                    $result = [GDI32]::BitBlt(
+                        $mirrorDesktop_DC,
+                        0,
+                        0,
+                        $screenBounds.Width,
+                        $screenBounds.Height,
+                        $desktop_DC,
+                        $screenBounds.Location.X,
+                        $screenBounds.Location.Y,
+                        $SRCCOPY -bor $CAPTUREBLT
+                    )
+
+                    if (-not $result)
+                    {
+                        continue
+                    }
+
+                    $updated = $false
+
+                    for ($y = 0; $y -lt $vertBlockCount; $y++)
+                    {
+                        for ($x = 0; $x -lt $horzBlockCount; $x++)
+                        {
+                            $null = [GDI32]::BitBlt(
+                                $spaceBlock_DC,
+                                0,
+                                0,
+                                $blockSize,
+                                $blockSize,
+                                $mirrorDesktop_DC,
+                                ($x * $blockSize),
+                                ($y * $blockSize),
+                                $SRCCOPY
+                            );
+
+                            if ($firstIteration)
+                            {
+                                # Big bang occurs, tangent univers is getting created, where is Donnie?
+                                $SpaceGrid[$y][$x] = [Runtime.InteropServices.Marshal]::AllocHGlobal($blockMemSize)
+
+                                [Kernel32]::CopyMemory($SpaceGrid[$y][$x], $spaceBlock_Ptr, $ptrBlockMemSize)
+                            }
+                            else
+                            {
+                                if ([MSVCRT]::memcmp($spaceBlock_Ptr, $SpaceGrid[$y][$x], $ptrBlockMemSize) -ne [IntPtr]::Zero)
+                                {
+                                    [Kernel32]::CopyMemory($SpaceGrid[$y][$x], $spaceBlock_Ptr, $ptrBlockMemSize)
+
+                                    if (-not $updated)
+                                    {
+                                        # Initialize with the first dirty block coordinates
+                                        $topLeftBlock.X = $x
+                                        $topLeftBlock.Y = $y
+
+                                        $bottomRightBlock = $topLeftBlock
+
+                                        $updated = $true
+                                    }
+                                    else
+                                    {
+                                        if ($x -lt $topLeftBlock.X)
+                                        {
+                                            $topLeftBlock.X = $x
+                                        }
+
+                                        if ($y -lt $topLeftBlock.Y)
+                                        {
+                                            $topLeftBlock.Y = $y
+                                        }
+
+                                        if ($x -gt $bottomRightBlock.X)
+                                        {
+                                            $bottomRightBlock.X = $x
+                                        }
+
+                                        if ($y -gt $bottomRightBlock.Y)
+                                        {
+                                            $bottomRightBlock.Y = $y
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if ($updated)
+                    {
+                        # Create new updated rectangle pointing to the dirty region (since last snapshot)
+                        $dirtyRect.X = $topLeftBlock.X * $blockSize
+                        $dirtyRect.Y = $topLeftBlock.Y * $blockSize
+
+                        $dirtyRect.Width = (($bottomRightBlock.X * $blockSize) + $blockSize) - $dirtyRect.Left
+                        $dirtyRect.Height = (($bottomRightBlock.Y * $blockSize) + $blockSize) - $dirtyRect.Top
+                    }
+
+                    if ($updated -or $firstIteration)
+                    {
+                        try
+                        {
+                            $dirtyRect_hBmp = [GDI32]::CreateCompatibleBitmap(
+                                $mirrorDesktop_DC,
+                                $dirtyRect.Width,
+                                $dirtyRect.Height
+                            )
+
+                            $null = [GDI32]::SelectObject($dirtyRect_DC, $dirtyRect_hBmp)
+
+                            $null = [GDI32]::BitBlt(
+                                $dirtyRect_DC,
+                                0,
+                                0,
+                                $dirtyRect.Width,
+                                $dirtyRect.Height,
+                                $mirrorDesktop_DC,
+                                $dirtyRect.X,
+                                $dirtyRect.Y,
+                                $SRCCOPY
+                            )
+
+                            [System.Drawing.Bitmap] $updatedDesktop = [System.Drawing.Image]::FromHBitmap($dirtyRect_hBmp)
+
+                            $desktopStream = New-Object System.IO.MemoryStream
+
+                            $updatedDesktop.Save($desktopStream, $encoder, $encoderParameters)
+
+                            $desktopStream.Position = 0
+
+                            try
+                            {
+                                # One call please
+                                [System.Runtime.InteropServices.Marshal]::WriteInt32($struct, 0x0, $desktopStream.Length)
+                                [System.Runtime.InteropServices.Marshal]::WriteInt32($struct, 0x4, $dirtyRect.Left)
+                                [System.Runtime.InteropServices.Marshal]::WriteInt32($struct, 0x8, $dirtyRect.Top)
+                                [System.Runtime.InteropServices.Marshal]::WriteByte($struct, 0xc, 0x0)
+
+                                $Client.SSLStream.Write($struct , 0, $struct.Length)
+
+                                $binaryReader = New-Object System.IO.BinaryReader($desktopStream)
+                                do
+                                {
+                                    $bufferSize = ($desktopStream.Length - $desktopStream.Position)
+                                    if ($bufferSize -gt $packetSize)
+                                    {
+                                        $bufferSize = $packetSize
+                                    }
+
+                                    $Client.SSLStream.Write($binaryReader.ReadBytes($bufferSize), 0, $bufferSize)
+                                } until ($desktopStream.Position -eq $desktopStream.Length)
+                            }
+                            catch
+                            {
+                                $collapsed = $true
+                                break
+                            }
+                        }
+                        finally
+                        {
+                            if ($dirtyRect_hBmp -ne [IntPtr]::Zero)
+                            {
+                                $null = [GDI32]::DeleteObject($dirtyRect_hBmp)
+                            }
+
+                            if ($desktopStream)
+                            {
+                                $desktopStream.Dispose()
+                            }
+
+                            if ($updatedDesktop)
+                            {
+                                $updatedDesktop.Dispose()
+                            }
+                        }
+                    }
+
+                    if ($firstIteration)
+                    {
+                        $firstIteration = $false
+                    }
+
+                    <#
+                    $fps++
+                    if ($Stopwatch.ElapsedMilliseconds -ge 1000)
+                    {
+                        $HostSyncHash.host.ui.WriteLine($fps)
+                        $fps = 0
+
+                        $Stopwatch.Restart()
+                    }
+                    #>
+                }
+            }
+            finally
+            {
+                # Free allocated resources
+                if ($mirrorDesktop_DC -ne [IntPtr]::Zero)
+                {
+                    $null = [GDI32]::DeleteDC($mirrorDesktop_DC)
+                }
+
+                if ($mirrorDesktop_hBmp -ne [IntPtr]::Zero)
+                {
+                    $null = [GDI32]::DeleteObject($mirrorDesktop_hBmp)
+                }
+
+                if ($spaceBlock_DC -ne [IntPtr]::Zero)
+                {
+                    $null = [GDI32]::DeleteDC($spaceBlock_DC)
+                }
+
+                if ($spaceBlock_hBmp -ne [IntPtr]::Zero)
+                {
+                    $null = [GDI32]::DeleteObject($spaceBlock_hBmp)
+                }
+
+                if ($dirtyRect_DC -ne [IntPtr]::Zero)
+                {
+                    $null = [GDI32]::DeleteDC($dirtyRect_DC)
+                }
+
+                if ($pBitmapInfoHeader -ne [IntPtr]::Zero)
+                {
+                    [System.Runtime.InteropServices.Marshal]::FreeHGlobal($pBitmapInfoHeader)
+                }
+
+                if ($desktop_DC -ne [IntPtr]::Zero)
+                {
+                    $null = [User32]::ReleaseDC([IntPtr]::Zero, $desktop_DC)
+                }
+
+                # Tangent univers big crunch
+                for ($y = 0; $y -lt $vertBlockCount; $y++)
+                {
+                    for ($x = 0; $x -lt $horzBlockCount; $x++)
+                    {
+                        [Runtime.InteropServices.Marshal]::FreeHGlobal($SpaceGrid[$y][$x])
+                    }
+                }
+            }
+        }
+    }
+    catch { }
+}
+
+# -------------------------------------------------------------------------------
+
+$global:HandleInputEvent_ScriptBlock = {
+    enum MouseFlags {
+        MOUSEEVENTF_ABSOLUTE = 0x8000
+        MOUSEEVENTF_LEFTDOWN = 0x0002
+        MOUSEEVENTF_LEFTUP = 0x0004
+        MOUSEEVENTF_MIDDLEDOWN = 0x0020
+        MOUSEEVENTF_MIDDLEUP = 0x0040
+        MOUSEEVENTF_MOVE = 0x0001
+        MOUSEEVENTF_RIGHTDOWN = 0x0008
+        MOUSEEVENTF_RIGHTUP = 0x0010
+        MOUSEEVENTF_WHEEL = 0x0800
+        MOUSEEVENTF_XDOWN = 0x0080
+        MOUSEEVENTF_XUP = 0x0100
+        MOUSEEVENTF_HWHEEL = 0x01000
+    }
+
+    enum InputEvent {
+        Keyboard = 0x1
+        MouseClickMove = 0x2
+        MouseWheel = 0x3
+        KeepAlive = 0x4
+        ClipboardUpdated = 0x5
+    }
+
+    enum MouseState {
+        Up = 0x1
+        Down = 0x2
+        Move = 0x3
+    }
+
+    enum ClipboardMode {
+        Disabled = 1
+        Receive = 2
+        Send = 3
+        Both = 4
+    }
+
+    $SM_CXSCREEN = 0
+    $SM_CYSCREEN = 1
+
+    function Set-MouseCursorPos
+    {
+        param(
+            [int] $X = 0,
+            [int] $Y = 0
+        )
+
+        $x_screen = [User32]::GetSystemMetrics($SM_CXSCREEN)
+        $y_screen = [User32]::GetSystemMetrics($SM_CYSCREEN)
+
+        [User32]::mouse_event(
+            [int][MouseFlags]::MOUSEEVENTF_MOVE -bor [int][MouseFlags]::MOUSEEVENTF_ABSOLUTE,
+            (65535 * $X) / $x_screen,
+            (65535 * $Y) / $y_screen,
+            0,
+            0
+        );
+    }
+
+    function Get-SpecialVirtualKey
+    {
+        <#
+            .SYNOPSIS
+                Get the Virtual Key Code for the specified special key.
+
+            .PARAMETER Key
+                The special key token to get the Virtual Key Code for.
+        #>
+        param (
+            [string]$Key
+        )
+
+        if ($Key.StartsWith("{") -and $Key.EndsWith("}"))
+        {
+            $Key = $Key.Substring(1, $Key.Length - 2)
+        }
+
+        $map = @{
+            "BACKSPACE"   = 0x08
+            "BS"          = 0x08
+            "BKSP"        = 0x08
+            "BREAK"       = 0x03
+            "CAPSLOCK"    = 0x14
+            "DELETE"      = 0x2E
+            "DEL"         = 0x2E
+            "DOWN"        = 0x28
+            "END"         = 0x23
+            "ENTER"       = 0x0D
+            "~"           = 0x0D
+            "ESC"         = 0x1B
+            "HELP"        = 0x2F
+            "HOME"        = 0x24
+            "INSERT"      = 0x2D
+            "INS"         = 0x2D
+            "LEFT"        = 0x25
+            "NUMLOCK"     = 0x90
+            "PGDN"        = 0x22
+            "PGUP"        = 0x21
+            "PRTSC"       = 0x2C
+            "RIGHT"       = 0x27
+            "SCROLLLOCK"  = 0x91
+            "TAB"         = 0x09
+            "UP"          = 0x26
+            "F1"          = 0x70
+            "F2"          = 0x71
+            "F3"          = 0x72
+            "F4"          = 0x73
+            "F5"          = 0x74
+            "F6"          = 0x75
+            "F7"          = 0x76
+            "F8"          = 0x77
+            "F9"          = 0x78
+            "F10"         = 0x79
+            "F11"         = 0x7A
+            "F12"         = 0x7B
+            "F13"         = 0x7C
+            "F14"         = 0x7D
+            "F15"         = 0x7E
+            "F16"         = 0x7F
+
+            # Modifier Keys
+            "+"           = 0x10  # SHIFT
+            "^"           = 0x11  # CTRL
+            "%"           = 0x12  # ALT
+            "!"           = 0x5B  # WIN
+        }
+
+        if ($map.ContainsKey($Key))
+        {
+            return $map[$Key]
+        }
+        else
+        {
+            return $null
+        }
+    }
+
+    function Edit-InputStruct
+    {
+        <#
+            .SYNOPSIS
+                Edit the INPUT struct at the specified index in the INPUT[] array (In Memory).
+
+            .PARAMETER Char
+                The character to simulate.
+
+            .PARAMETER InputArray
+                The pointer to the INPUT[] array.
+
+            .PARAMETER Index
+                The index of the INPUT struct to edit.
+
+            .PARAMETER KeyUp
+                If the key should be released.
+
+            .PARAMETER Reset
+                If the INPUT struct should be reset (ZeroMemory).
+
+            .PARAMETER ForceVK
+                If the Virtual Key Code should be forced.
+        #>
+        param(
+            [parameter(Mandatory = $true)]
+            [string]$Char,
+
+            [parameter(Mandatory = $true)]
+            [IntPtr]$InputArray,
+
+            [parameter(Mandatory = $true)]
+            [int]$Index,
+
+            [bool]$KeyUp = $false,
+            [bool]$Reset = $false,
+            [bool]$ForceVK = $false
+        )
+
+        if ($InputArray -eq [IntPtr]::Zero)
+        {
+            return
+        }
+
+        # ------------------------------------------------------------------------#
+        # Field      | Type      | Size x32 | Offset x32 | Size x64 | Offset x64  #
+        # ------------------------------------------------------------------------#
+        # INPUT                                                                   #
+        # ------------------------------------------------------------------------#
+        # type       | DWORD     | 0x4       | 0x0       | 0x4      | 0x0         #
+        # ------------------------------------------------------------------------#
+        # KEYBDINPUT (UNION) - INPUT.ki                                           #
+        # Largest Union is MOUSEINPUT (x32 = 24 Bytes, x64 = 32 Bytes)            #
+        # ------------------------------------------------------------------------#
+        # wVk        | WORD      | 0x2       | 0x4       | 0x2      | 0x8         #
+        # wScan      | WORD      | 0x2       | 0x6       | 0x2      | 0xA         #
+        # dwFlags    | DWORD     | 0x4       | 0x8       | 0x4      | 0xC         #
+        # time       | DWORD     | 0x4       | 0xC       | 0x4      | 0x10        #
+        # dwExtraInfo| ULONG8PTR | 0x4       | 0x10      | 0x8      | 0x18        #
+        # ------------------------------------------------------------------------#
+        # Total Size x32 : 0x1C (28 Bytes)   |   Total Size x64 : 0x28 (40 Bytes) #
+        # ------------------------------------------------------------------------#
+        if ([IntPtr]::Size -eq 0x8)
+        {
+            # x64
+            $structSize =  + 0x28
+
+            $offset_wVk = 0x8
+            $offset_wScan = 0xA
+            $offset_dwFlags = 0xC
+        }
+        else
+        {
+            # x32
+            $structSize = 0x1C
+
+            $offset_wVk = 0x4
+            $offset_wScan = 0x6
+            $offset_dwFlags = 0x8
+        }
+
+        $INPUT_KEYBOARD = 0x1;
+        $KEYEVENTF_UNICODE = 0x4;
+        $KEYEVENTF_KEYUP = 0x2;
+
+        $inputStruct = [IntPtr]::Add($InputArray, ($structSize * $Index))
+
+        if ($Reset)
+        {
+            for ($i = 0; $i -lt $structSize; $i++)
+            {
+                [System.Runtime.InteropServices.Marshal]::WriteByte($inputStruct, $i, 0x0)
+            }
+        }
+
+        $dwFlags = 0x0
+        $wScan = 0x0
+        $wVk = 0x0
+
+        if ($Char.Length -gt 1 -and $Char.StartsWith('{') -and $Char.EndsWith('}'))
+        {
+            $wVk = Get-SpecialVirtualKey -Key $Char
+            if (-not $wVk)
+            {
+                return
+            }
+        }
+        elseif ($Char.Length -eq 1)
+        { 
+            if ($ForceVK)
+            {
+                $wVk = [int][char]$Char
+            }
+            else
+            {
+                $dwFlags = $KEYEVENTF_UNICODE
+                $wScan = [int][char]$Char 
+            }
+        }
+        else
+        {
+            return
+        }
+
+        if ($KeyUp)
+        {
+            $dwFlags = $dwFlags -bor $KEYEVENTF_KEYUP
+        }
+
+        [System.Runtime.InteropServices.Marshal]::WriteInt32($inputStruct, 0x0, $INPUT_KEYBOARD)      # INPUT.type
+
+        [System.Runtime.InteropServices.Marshal]::WriteInt16($inputStruct, $offset_wVk, $wVk)         # INPUT.KEYBDINPUT.wVk
+        [System.Runtime.InteropServices.Marshal]::WriteInt16($inputStruct, $offset_wScan, $wScan)     # INPUT.KEYBDINPUT.wScan
+        [System.Runtime.InteropServices.Marshal]::WriteInt32($inputStruct, $offset_dwFlags, $dwFlags) # INPUT.KEYBDINPUT.dwFlags
+    }
+
+    function Invoke-KeyboardInputSimulator {
+        <#
+            .SYNOPSIS
+                Simulate keyboard input for the specified characters.
+
+            .PARAMETER InputItems
+                The characters to simulate.
+        #>
+        param (
+            [parameter(Mandatory = $true)]
+            [string[]]$InputItems,
+
+            [bool]$IsShortcut = $false
+        )
+
+        if ([IntPtr]::Size -eq 0x8)
+        {
+            $structSize = 0x28
+        }
+        else
+        {
+            $structSize = 0x1C
+        }
+
+        $inputArrayCount = $InputItems.Length * 2
+        $inputArraySize = $structSize * $inputArrayCount
+
+        # Allocate memory for the INPUT[] structs. (SizeOf(INPUT) * InputItems.Length) * 2 (Up and Down INPUT structs)
+        $inputArray = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($inputArraySize)
+        try
+        {
+            # Zero out the memory
+            for ($i = 0; $i -lt $inputArraySize; $i++)
+            {
+                [System.Runtime.InteropServices.Marshal]::WriteByte($inputArray, $i, 0x0)
+            }
+
+            for ($i = 0; $i -lt $InputItems.Length; $i++)
+            {
+                if ($IsShortcut)
+                {
+                    # If the input is a shortcut, we need to send the key down and key up events separately.
+                    $indexDown = $i
+                    $indexUp = $InputItems.Length + $i
+                    $forceVK = $true
+                }
+                else
+                {
+                    # If the input is a normal character, we can send the key down and key up events together.
+                    $indexDown = $i * 2
+                    $indexUp = $indexDown + 1
+                    $forceVK = $false
+                }
+
+                Edit-InputStruct -Char $InputItems[$i] -InputArray $inputArray -Index $indexDown -ForceVK $forceVK
+                Edit-InputStruct -Char $InputItems[$i] -InputArray $inputArray -Index $indexUp -KeyUp $true -ForceVK $forceVK
+            }
+
+            $null = [User32]::SendInput($inputArrayCount, $inputArray, $structSize)
+        }
+        finally
+        {
+            [System.Runtime.InteropServices.Marshal]::FreeHGlobal($inputArray)
+        }
+    }
+
+    function Get-InputKeysFromFormatedString
+    {
+        <#
+            .SYNOPSIS
+                Get the input keys from the formated string with matching pattern.
+
+            .PARAMETER Text
+                The text to get the input keys from.
+
+            .PARAMETER Pattern
+                The pattern to match the input keys.
+        #>
+        param(
+            [parameter(Mandatory = $true)]
+            [string]$Text,
+
+            [parameter(Mandatory = $true)]
+            [string]$Pattern,
+
+            [parameter(Mandatory = $true)]
+            [char]$EscapeChar
+
+        )
+
+        $m = [regex]::matches($Text, $pattern)
+
+        return @($m | ForEach-Object { 
+            # If we match `EscapeChar` (escaped), we replace with a single `EscapeChar`
+            if ($_.Value -eq [string]::new($EscapeChar, 2)) {
+                return $EscapeChar
+            }
+            return $_.Value
+        })
+    }
+
+    function Invoke-KeyboardWriteText {
+        <#
+            .SYNOPSIS
+                Simulate keyboard input for the specified text (Support Special Characters).
+
+            .PARAMETER Text
+                The text to simulate.
+
+            .PARAMETER IsShortcut
+                If the input text must be treated as a shortcut.
+        #>
+        param (
+            [parameter(Mandatory = $true)]
+            [string]$Text,
+
+            [bool]$IsShortcut = $false
+
+        )
+
+        $inputItems = Get-InputKeysFromFormatedString -Text $Text -Pattern '(\{\{)|(\{[^}]*\})|.' -EscapeChar '{'
+
+        Invoke-KeyboardInputSimulator -InputItems $inputItems -IsShortcut $IsShortcut
+    }
+    function Invoke-SetClipboardData {
+        <#
+            .SYNOPSIS
+                Set text to clipboard using Windows API only.
+    
+            .DESCRIPTION
+                Using Windows API to set text to clipboard is required to support MTA Runspaces.
+    
+            .PARAMETER Text
+                Text to set to clipboard.
+        #>
+        param(
+            [Parameter(Mandatory=$true)]
+            [string]$Text
+        )
+
+        if (-not [User32]::OpenClipboard([IntPtr]::Zero)) {
+            throw [WinAPIException]::new("OpenClipboard")
+        }
+        try
+        {
+            if (-not [User32]::EmptyClipboard()) {
+                throw [WinAPIException]::new("EmptyClipboard")
+            }
+    
+            $hGlobal = [System.Runtime.InteropServices.Marshal]::StringToHGlobalUni($Text)
+            if ($hGlobal -eq [IntPtr]::Zero) {
+                return
+            }
+
+            $CF_UNICODETEXT = 13
+            if ([User32]::SetClipboardData($CF_UNICODETEXT, $hGlobal) -eq [IntPtr]::Zero) {
+                [System.Runtime.InteropServices.Marshal]::FreeHGlobal($hGlobal)
+
+                throw [WinAPIException]::new("SetClipboardData")
+            }
+        }
+        finally
+        {
+            $null = [User32]::CloseClipboard()
+        }
+    }
+
+    function Invoke-InputEvent
+    {
+        param([PSCustomObject] $aEvent = $null)
+
+        try
+        {
+            if (-not $aEvent)
+            { return }
+
+            switch ([InputEvent] $aEvent.Id)
+            {
+                # Keyboard Input Simulation
+                ([InputEvent]::Keyboard)
+                {
+                    if (-not ($aEvent.PSobject.Properties.name -match "Keys"))
+                    { break }
+
+                    if ($aEvent.PSobject.Properties.name -match "IsShortcut")
+                    {
+                        $isShortcut = $aEvent.IsShortcut
+                    }
+                    else
+                    {
+                        $isShortcut = $false
+                    }
+                    
+                    switch ($aEvent.Keys)
+                    {
+                        # Special Actions (e.g., Lock Workstation)
+                        "{LOCKWORKSTATION}"
+                        {
+                            [User32]::LockWorkStation()
+
+                            break
+                        }
+
+                        default
+                        {
+                            Invoke-KeyboardWriteText -Text $aEvent.Keys -IsShortcut $isShortcut
+
+                            break
+                        }
+                    }
+
+                    break
+                }
+
+                # Mouse Move & Click Simulation
+                ([InputEvent]::MouseClickMove)
+                {
+                    if (-not ($aEvent.PSobject.Properties.name -match "Type"))
+                    { break }
+
+                    switch ([MouseState] $aEvent.Type)
+                    {
+                        # Mouse Down/Up
+                        {($_ -eq ([MouseState]::Down)) -or ($_ -eq ([MouseState]::Up))}
+                        {
+                            #[User32]::SetCursorPos($aEvent.X, $aEvent.Y)
+                            Set-MouseCursorPos -X $aEvent.X -Y $aEvent.Y
+
+                            $down = ($_ -eq ([MouseState]::Down))
+
+                            $mouseCode = [int][MouseFlags]::MOUSEEVENTF_LEFTDOWN
+                            if (-not $down)
+                            {
+                                $mouseCode = [int][MouseFlags]::MOUSEEVENTF_LEFTUP
+                            }
+
+                            switch($aEvent.Button)
+                            {
+                                "Right"
+                                {
+                                    if ($down)
+                                    {
+                                        $mouseCode = [int][MouseFlags]::MOUSEEVENTF_RIGHTDOWN
+                                    }
+                                    else
+                                    {
+                                        $mouseCode = [int][MouseFlags]::MOUSEEVENTF_RIGHTUP
+                                    }
+
+                                    break
+                                }
+
+                                "Middle"
+                                {
+                                    if ($down)
+                                    {
+                                        $mouseCode = [int][MouseFlags]::MOUSEEVENTF_MIDDLEDOWN
+                                    }
+                                    else
+                                    {
+                                        $mouseCode = [int][MouseFlags]::MOUSEEVENTF_MIDDLEUP
+                                    }
+                                }
+                            }
+                            [User32]::mouse_event($mouseCode, 0, 0, 0, 0);
+
+                            break
+                        }
+
+                        # Mouse Move
+                        ([MouseState]::Move)
+                        {
+                            #[User32]::SetCursorPos($aEvent.X, $aEvent.Y)
+                            Set-MouseCursorPos -X $aEvent.X -Y $aEvent.Y
+
+                            break
+                        }
+                    }
+
+                    break
+                }
+
+                # Mouse Wheel Simulation
+                ([InputEvent]::MouseWheel) {
+                    [User32]::mouse_event([int][MouseFlags]::MOUSEEVENTF_WHEEL, 0, 0, $aEvent.Delta, 0);
+
+                    break
+                }
+
+                # Clipboard Update
+                ([InputEvent]::ClipboardUpdated)
+                {
+                    if ($Clipboard -eq ([ClipboardMode]::Disabled) -or $Clipboard -eq ([ClipboardMode]::Send))
+                    { break }
+
+                    if (-not ($aEvent.PSobject.Properties.name -match "Text"))
+                    { break }
+
+                    $HostSyncHash.ClipboardText = $aEvent.Text
+
+                    Invoke-SetClipboardData -Text $aEvent.Text
+                }
+            }
+        }
+        catch {}
+    }
+}
+
+# -------------------------------------------------------------------------------
+
+$global:IngressEventScriptBlock = {
+    while ($SafeHash.SessionActive)
+    {
+        try
+        {
+            $jsonEvent = $Reader.ReadLine()
+        }
+        catch
+        {
+            # ($_ | Out-File "c:\temp\debug.txt")
+
+            break
+        }
+
+        if ($logonUIAccess)
+        {
+            # Attempt to switch current thread desktop (LogonUI / Secure Desktop support)
+            Update-CurrentThreadDesktopWidthInputDesktop
+        }
+
+        try
+        {
+            $aEvent = $jsonEvent | ConvertFrom-Json
+        }
+        catch { continue }
+
+        if (-not ($aEvent.PSobject.Properties.name -match "Id"))
+        { continue }
+
+        # Handle Event in default desktop
+        Invoke-InputEvent -aEvent $aEvent
+    }
+}
+
+# -------------------------------------------------------------------------------
+
+$global:EgressEventScriptBlock = {
+
+    enum CursorType {
+        IDC_APPSTARTING = 32650
+        IDC_ARROW = 32512
+        IDC_CROSS = 32515
+        IDC_HAND = 32649
+        IDC_HELP = 32651
+        IDC_IBEAM = 32513
+        IDC_ICON = 32641
+        IDC_NO = 32648
+        IDC_SIZE = 32640
+        IDC_SIZEALL = 32646
+        IDC_SIZENESW = 32643
+        IDC_SIZENS = 32645
+        IDC_SIZENWSE = 32642
+        IDC_SIZEWE = 32644
+        IDC_UPARROW = 32516
+        IDC_WAIT = 32514
+    }
+
+    enum OutputEvent {
+        KeepAlive = 0x1
+        MouseCursorUpdated = 0x2
+        ClipboardUpdated = 0x3
+        DesktopActive = 0x4
+        DesktopInactive = 0x5
+    }
+
+    enum ClipboardMode {
+        Disabled = 1
+        Receive = 2
+        Send = 3
+        Both = 4
+    }
+
+    function Initialize-Cursors
+    {
+        <#
+            .SYNOPSIS
+                Initialize different Windows supported mouse cursors.
+
+            .DESCRIPTION
+                Unfortunately, there is not WinAPI to get current mouse cursor icon state (Ex: as a flag)
+                but only current mouse cursor icon (via its handle).
+
+                One solution, is to resolve each supported mouse cursor handles (HCURSOR) with corresponding name
+                in a hashtable and then compare with GetCursorInfo() HCURSOR result.
+        #>
+        $cursors = @{}
+
+        foreach ($cursorType in [CursorType].GetEnumValues()) {
+            $result = [User32]::LoadCursorA(0, [int]$cursorType)
+
+            if ($result -gt 0)
+            {
+                $cursors[[string] $cursorType] = $result
+            }
+        }
+
+        return $cursors
+    }
+
+    function Get-GlobalMouseCursorIconHandle
+    {
+        <#
+            .SYNOPSIS
+                Return global mouse cursor handle.
+            .DESCRIPTION
+                For this project I really want to avoid using "inline c#" but only pure PowerShell Code.
+                I'm using a Hackish method to retrieve the global Windows cursor info by playing by hand
+                with memory to prepare and read CURSORINFO structure.
+                ---
+                typedef struct tagCURSORINFO {
+                    DWORD   cbSize;       // Size: 0x4
+                    DWORD   flags;        // Size: 0x4
+                    HCURSOR hCursor;      // Size: 0x4 (32bit) , 0x8 (64bit)
+                    POINT   ptScreenPos;  // Size: 0x8
+                } CURSORINFO, *PCURSORINFO, *LPCURSORINFO;
+                Total Size of Structure:
+                    - [32bit] 20 Bytes
+                    - [64bit] 24 Bytes
+        #>
+
+        # sizeof(cbSize) + sizeof(flags) + sizeof(ptScreenPos) = 16
+        $structSize = [IntPtr]::Size + 16
+
+        $cursorInfo = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($structSize)
+        try
+        {
+            # ZeroMemory(@cursorInfo, SizeOf(tagCURSORINFO))
+            for ($i = 0; $i -lt $structSize; $i++)
+            {
+                [System.Runtime.InteropServices.Marshal]::WriteByte($cursorInfo, $i, 0x0)
+            }
+
+            [System.Runtime.InteropServices.Marshal]::WriteInt32($cursorInfo, 0x0, $structSize)
+
+            if ([User32]::GetCursorInfo($cursorInfo))
+            {
+                $hCursor = [System.Runtime.InteropServices.Marshal]::ReadInt64($cursorInfo, 0x8)
+
+                return $hCursor
+            }
+
+            <#for ($i = 0; $i -lt $structSize; $i++)
+            {
+                $offsetValue = [System.Runtime.InteropServices.Marshal]::ReadByte($cursorInfo, $i)
+                Write-Host "Offset: ${i} -> " -NoNewLine
+                Write-Host $offsetValue -ForegroundColor Green -NoNewLine
+                Write-Host ' (' -NoNewLine
+                Write-Host ('0x{0:x}' -f $offsetValue) -ForegroundColor Cyan -NoNewLine
+                Write-Host ')'
+            }#>
+        }
+        finally
+        {
+            [System.Runtime.InteropServices.Marshal]::FreeHGlobal($cursorInfo)
+        }
+    }
+
+    function Send-Event
+    {
+        <#
+            .SYNOPSIS
+                Send an event to remote peer.
+
+            .PARAMETER AEvent
+                Type: Enum
+                Default: None
+                Description: The event to send to remote viewer.
+
+            .PARAMETER Data
+                Type: PSCustomObject
+                Default: None
+                Description: Additional information about the event.
+        #>
+        param (
+            [Parameter(Mandatory=$True)]
+            [OutputEvent] $AEvent,
+
+            [PSCustomObject] $Data = $null
+        )
+
+        try
+        {
+            if (-not $Data)
+            {
+                $Data = New-Object -TypeName PSCustomObject -Property @{
+                    Id = $AEvent
+                }
+            }
+            else
+            {
+                $Data | Add-Member -MemberType NoteProperty -Name "Id" -Value $AEvent
+            }
+
+            $Writer.WriteLine(($Data | ConvertTo-Json -Compress))
+
+            return $true
+        }
+        catch
+        {
+            return $false
+        }
+    }
+
+    $cursors = Initialize-Cursors
+
+    $oldCursor = 0
+
+    $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+    while ($SafeHash.SessionActive)
+    {
+        # Events that occurs every seconds needs to be placed bellow.
+        # If no event has occured during this second we send a Keep-Alive signal to
+        # remote peer and detect a potential socket disconnection.
+        if ($stopWatch.ElapsedMilliseconds -ge 1000)
+        {
+            try
+            {
+                $eventTriggered = $false
+
+                # Clipboard Update Detection
+                if (
+                    ($Clipboard -eq ([ClipboardMode]::Both) -or $Clipboard -eq ([ClipboardMode]::Send))
+                )
+                {
+                    # IDEA: Check for existing clipboard change event or implement a custom clipboard
+                    # change detector using "WM_CLIPBOARDUPDATE" for example (WITHOUT INLINE C#)
+                    # It is not very important but it would avoid calling "Get-Clipboard" every seconds.
+                    $currentClipboard = (Get-Clipboard -Raw)
+
+                    if ($currentClipboard -and $currentClipboard -cne $HostSyncHash.ClipboardText)
+                    {
+                        $data = New-Object -TypeName PSCustomObject -Property @{
+                            Text = $currentClipboard
+                        }
+
+                        if (-not (Send-Event -AEvent ([OutputEvent]::ClipboardUpdated) -Data $data))
+                        { break }
+
+                        $HostSyncHash.ClipboardText = $currentClipboard
+
+                        $eventTriggered = $true
+                    }
+                }
+
+                # Send a Keep-Alive if during this second iteration nothing happened.
+                if (-not $eventTriggered)
+                {
+                    if (-not (Send-Event -AEvent ([OutputEvent]::KeepAlive)))
+                    { break }
+                }
+            }
+            finally
+            {
+                $stopWatch.Restart()
+            }
+        }
+
+        # Monitor for global mouse cursor change
+        # Update Frequently (Maximum probe time to be efficient: 50ms)
+        $currentCursor = Get-GlobalMouseCursorIconHandle
+        if ($currentCursor -ne 0 -and $currentCursor -ne $oldCursor)
+        {
+            $cursorTypeName = ($cursors.GetEnumerator() | Where-Object { $_.Value -eq $currentCursor }).Key
+
+            $data = New-Object -TypeName PSCustomObject -Property @{
+                Cursor = $cursorTypeName
+            }
+
+            if (-not (Send-Event -AEvent ([OutputEvent]::MouseCursorUpdated) -Data $data))
+            { break }
+
+            $oldCursor = $currentCursor
+        }
+
+        Start-Sleep -Milliseconds 50
+    }
+
+    $stopWatch.Stop()
+}
+
+# ----------------------------------------------------------------------------- #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+#  Local Functions                                                              #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+# ----------------------------------------------------------------------------- #
+
+function Write-Banner
 {
     <#
         .SYNOPSIS
@@ -244,7 +2108,7 @@ function Write-Log
     )
 
     switch ($LogKind)
-    {    
+    {
         ([LogKind]::Warning)
         {
             $icon = "!!"
@@ -276,17 +2140,19 @@ function Write-Log
         }
     }
 
-    Write-Host "[ " -NoNewLine    
-    Write-Host $icon -ForegroundColor $color -NoNewLine        
+    Write-Host "[ " -NoNewLine
+    Write-Host $icon -ForegroundColor $color -NoNewLine
     Write-Host " ] $Message"
 }
+
+# -------------------------------------------------------------------------------
 
 function Write-OperationSuccessState
 {
     param(
         [Parameter(Mandatory=$True)]
         $Result,
-        
+
         [Parameter(Mandatory=$True)]
         $Message
     )
@@ -303,6 +2169,8 @@ function Write-OperationSuccessState
     Write-Log -Message $Message -LogKind $kind
 }
 
+# -------------------------------------------------------------------------------
+
 function Invoke-PreventSleepMode
 {
     <#
@@ -315,8 +2183,8 @@ function Invoke-PreventSleepMode
     #>
 
     $ES_AWAYMODE_REQUIRED = [uint32]"0x00000040"
-    $ES_CONTINUOUS = [uint32]"0x80000000"    
-    $ES_SYSTEM_REQUIRED = [uint32]"0x00000001"    
+    $ES_CONTINUOUS = [uint32]"0x80000000"
+    $ES_SYSTEM_REQUIRED = [uint32]"0x00000001"
 
     return [Kernel32]::SetThreadExecutionState(
         $ES_CONTINUOUS -bor
@@ -324,6 +2192,8 @@ function Invoke-PreventSleepMode
         $ES_AWAYMODE_REQUIRED
     )
 }
+
+# -------------------------------------------------------------------------------
 
 function Update-ThreadExecutionState
 {
@@ -336,11 +2206,13 @@ function Update-ThreadExecutionState
     #>
     param(
         [Parameter(Mandatory=$True)]
-        $Flags    
+        $Flags
     )
 
     return [Kernel32]::SetThreadExecutionState($Flags) -ne 0
 }
+
+# -------------------------------------------------------------------------------
 
 function Get-PlainTextPassword
 {
@@ -359,7 +2231,7 @@ function Get-PlainTextPassword
 
     $BSTR = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePassword)
     try
-    {        
+    {
         return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($BSTR)
     }
     finally
@@ -367,6 +2239,8 @@ function Get-PlainTextPassword
         [Runtime.InteropServices.Marshal]::FreeBSTR($BSTR)
     }
 }
+
+# -------------------------------------------------------------------------------
 
 function Test-PasswordComplexity
 {
@@ -379,12 +2253,12 @@ function Test-PasswordComplexity
                 * Minimum 12 Characters.
                 * One of following symbols: "!@#%^&*_".
                 * At least of lower case character.
-                * At least of upper case character. 
+                * At least of upper case character.
 
         .PARAMETER SecurePasswordCandidate
             Type: SecureString
             Default: None
-            Description: Secure String object containing the password to test.            
+            Description: Secure String object containing the password to test.
     #>
     param (
         [Parameter(Mandatory=$True)]
@@ -396,15 +2270,17 @@ function Test-PasswordComplexity
     return (Get-PlainTextPassword -SecurePassword $SecurePasswordCandidate) -match $complexityRules
 }
 
+# -------------------------------------------------------------------------------
+
 function New-RandomPassword
-{    
+{
     <#
         .SYNOPSIS
             Generate a new secure password.
 
         .DESCRIPTION
             Generate new password candidates until one candidate match complexity rules.
-            Generally only one iteration is enough but in some rare case it could be one or two more.            
+            Generally only one iteration is enough but in some rare case it could be one or two more.
     #>
     do
     {
@@ -412,7 +2288,7 @@ function New-RandomPassword
 
         $candidate = -join ((1..18) | ForEach-Object { Get-Random -Input $authorizedChars.ToCharArray() })
 
-        $secureCandidate = ConvertTo-SecureString -String $candidate -AsPlainText -Force        
+        $secureCandidate = ConvertTo-SecureString -String $candidate -AsPlainText -Force
     } until (Test-PasswordComplexity -SecurePasswordCandidate $secureCandidate)
 
     $candidate = $null
@@ -420,8 +2296,10 @@ function New-RandomPassword
     return $secureCandidate
 }
 
+# -------------------------------------------------------------------------------
+
 function Get-DefaultCertificateOrCreate
-{    
+{
     <#
         .SYNOPSIS
             Get default certificate from user store or create a new one.
@@ -445,6 +2323,8 @@ function Get-DefaultCertificateOrCreate
         return $certificates[0]
     }
 }
+
+# -------------------------------------------------------------------------------
 
 function Get-SHA512FromString
 {
@@ -470,12 +2350,14 @@ function Get-SHA512FromString
     return (Get-FileHash -InputStream $buffer -Algorithm SHA512).Hash
 }
 
+# -------------------------------------------------------------------------------
+
 function Resolve-AuthenticationChallenge
 {
     <#
         .SYNOPSIS
             Algorithm to solve the server challenge during password authentication.
-        
+
         .DESCRIPTION
             Server needs to resolve the challenge and keep the solution in memory before sending
             the candidate to remote peer.
@@ -483,7 +2365,7 @@ function Resolve-AuthenticationChallenge
         .PARAMETER Password
             Type: SecureString
             Default: None
-            Description: Secure String object containing the password for resolving challenge.            
+            Description: Secure String object containing the password for resolving challenge.
 
         .PARAMETER Candidate
             Type: String
@@ -495,13 +2377,13 @@ function Resolve-AuthenticationChallenge
         .EXAMPLE
             Resolve-AuthenticationChallenge -Password "s3cr3t!" -Candidate "rKcjdh154@]=Ldc"
     #>
-    param (        
+    param (
        [Parameter(Mandatory=$True)]
-       [SecureString] $SecurePassword, 
+       [SecureString] $SecurePassword,
 
        [Parameter(Mandatory=$True)]
        [string] $Candidate
-    )       
+    )
 
     $pbkdf2 = New-Object System.Security.Cryptography.Rfc2898DeriveBytes(
         (Get-PlainTextPassword -SecurePassword $SecurePassword),
@@ -511,1104 +2393,95 @@ function Resolve-AuthenticationChallenge
     )
     try
     {
-        return -join ($pbkdf2.GetBytes(64) | ForEach-Object { "{0:X2}" -f $_ })        
+        return -join ($pbkdf2.GetBytes(64) | ForEach-Object { "{0:X2}" -f $_ })
     }
     finally {
         $pbkdf2.Dispose()
-    }    
-}
-
-$global:DesktopStreamScriptBlock = {     
-    function Get-ScreenList()
-    {
-        <#
-            .SYNOPSIS
-                Return an array of screen objects.
-
-            .DESCRIPTION
-                A screen refer to physical or virtual screen (monitor).                
-
-        #>
-        $result = @()
-
-        $screens = ([System.Windows.Forms.Screen]::AllScreens | Sort-Object -Property Primary -Descending)
-
-        $i = 0
-        foreach ($screen in $screens)
-        {
-            $i++
-
-            # Take a snapshot of the screen (16:9 aspect ratio)
-            # $scaledWidth = 260
-            # $scaledHeight = 146
-
-            <#
-            $bitmap = $null
-            $graphics = $null
-            $scaledBitmap = $null
-            $scaledGraphics = $null
-            $memoryStream = $null
-
-            try
-            {
-            $bitmap = New-Object System.Drawing.Bitmap($screen.Bounds.Width, $screen.Bounds.Height)
-            
-            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-
-            $graphics.CopyFromScreen(0, 0, 0, 0, $bitmap.Size)
-
-            $scaledBitmap = New-Object System.Drawing.Bitmap($scaledWidth, $scaledHeight)
-            
-            $scaledGraphics = [System.Drawing.Graphics]::FromImage($scaledBitmap)
-            
-            $scaledGraphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
-            $scaledGraphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
-            $scaledGraphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality            
-            $scaledGraphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-
-            $scaledGraphics.DrawImage($bitmap, 0, 0, $scaledWidth, $scaledHeight)
-
-            $memoryStream = New-Object System.IO.MemoryStream
-            $scaledBitmap.Save($memoryStream, [System.Drawing.Imaging.ImageFormat]::Jpeg)
-            $memoryStream.Position = 0
-
-            $preview = [Convert]::ToBase64String($memoryStream.ToArray())
-            }
-            finally
-            {
-                if ($bitmap)
-                {
-                    $bitmap.Dispose()
-                }
-
-                if ($graphics)
-                {
-                    $graphics.Dispose()
-                }
-
-                if ($scaledBitmap)
-                {
-                    $scaledBitmap.Dispose()
-                }
-
-                if ($scaledGraphics)
-                {
-                    $scaledGraphics.Dispose()
-                }
-
-                if ($memoryStream)
-                {
-                    $memoryStream.Dispose()
-                }
-            }   
-            #>                             
-
-            # Append screen object to result array
-            $result += New-Object -TypeName PSCustomObject -Property @{
-                Id = $i
-                Name = $screen.DeviceName
-                Primary = $screen.Primary
-                Width = $screen.Bounds.Width
-                Height = $screen.Bounds.Height
-                X = $screen.Bounds.X 
-                Y = $screen.Bounds.Y
-                # Preview = $preview
-            }
-        }
-
-        return ,$result
-    }
-
-    $mirrorDesktop_DC = [IntPtr]::Zero
-    $desktop_DC = [IntPtr]::Zero
-    $mirrorDesktop_hBmp = [IntPtr]::Zero
-    $spaceBlock_DC = [IntPtr]::Zero
-    $spaceBlock_hBmp = [IntPtr]::Zero
-    $dirtyRect_DC = [IntPtr]::Zero
-    $pBitmapInfoHeader = [IntPtr]::Zero
-
-    $SRCCOPY = 0x00CC0020    
-    $DIB_RGB_COLORS = 0x0
-    try
-    {                                  
-        $screens = New-Object PSCustomObject -Property @{    
-            List = (Get-ScreenList)
-        }
-        $Param.Client.WriteJson($screens)
-
-        $screen = $null
-        
-        $viewerExpectation = $Param.Client.ReadLine() | ConvertFrom-Json
-
-        if ($viewerExpectation.PSobject.Properties.name -contains "ScreenName")
-        {        
-            $screen = [System.Windows.Forms.Screen]::AllScreens | Where-Object -FilterScript { 
-                $_.DeviceName -eq $viewerExpectation.ScreenName 
-            }
-                    
-            # TODO: Add other parameters
-        }                  
-        
-        if ($screen -eq $null)
-        {
-            $screen = [System.Windows.Forms.Screen]::PrimaryScreen
-        }        
-            
-        # Default
-        $blockSize = 64
-        $packetSize = 4096
-        $compressionQuality = 100
-
-        # User-defined (Optional)
-        if ($viewerExpectation.PSobject.Properties.name -contains "BlockSize")
-        {
-            $blockSize = $viewerExpectation.BlockSize
-        }
-
-        if ($viewerExpectation.PSobject.Properties.name -contains "PacketSize")
-        {
-            $packetSize = $viewerExpectation.PacketSize
-        }
-
-        if ($viewerExpectation.PSobject.Properties.name -contains "ImageCompressionQuality")
-        {
-            $compressionQuality = $viewerExpectation.ImageCompressionQuality
-        }
-
-        $screenBounds = $screen.Bounds
-
-        $SpaceGrid = $null
-        $horzBlockCount = [math]::ceiling($screenBounds.Width / $blockSize)
-        $vertBlockCount = [math]::ceiling($screenBounds.Height / $blockSize)         
-
-        $encoderParameters = New-Object System.Drawing.Imaging.EncoderParameters(1) 
-        $encoderParameters.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
-            [System.Drawing.Imaging.Encoder]::Quality,
-            $compressionQuality
-        )
-
-        $encoder = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' };
-
-        $SpaceGrid = New-Object IntPtr[][] $vertBlockCount, $horzBlockCount    
-
-        $firstIteration = $true
-
-        # Create our desktop mirror (For speeding up BitBlt calls)
-
-        [IntPtr] $desktop_DC = [User32]::GetWindowDC([User32]::GetDesktopWindow())
-        [IntPtr] $mirrorDesktop_DC = [GDI32]::CreateCompatibleDC($desktop_DC)
-
-        [IntPtr] $mirrorDesktop_hBmp = [GDI32]::CreateCompatibleBitmap(
-            $desktop_DC,
-            $screenBounds.Width,
-            $screenBounds.Height
-        )
-
-        $null = [GDI32]::SelectObject($mirrorDesktop_DC, $mirrorDesktop_hBmp)   
-
-        # Create our block of space for change detection
-
-        <#
-            typedef struct tagBITMAPINFOHEADER {
-                // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x0        
-                DWORD biSize;
-
-                // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x4        
-                LONG  biWidth;
-
-                // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x8        
-                LONG  biHeight;
-
-                // x86-32|64: 0x2 Bytes | Padding = 0x0 | Offset: 0xc        
-                WORD  biPlanes;
-
-                // x86-32|64: 0x2 Bytes | Padding = 0x0 | Offset: 0xe      
-                WORD  biBitCount;
-
-                // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x10       
-                DWORD biCompression;
-
-                // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x14        
-                DWORD biSizeImage;
-
-                // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x18       
-                LONG  biXPelsPerMeter;
-
-                // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x1c       
-                LONG  biYPelsPerMeter;
-
-                // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x20       
-                DWORD biClrUsed;
-
-                // x86-32|64: 0x4 Bytes | Padding = 0x0 | Offset: 0x24       
-                DWORD biClrImportant;
-            } BITMAPINFOHEADER, *LPBITMAPINFOHEADER, *PBITMAPINFOHEADER; 
-
-            // x86-32|64 Struct Size: 0x28 (40 Bytes)
-            // BITMAPINFO = BITMAPINFOHEADER (0x28) + RGBQUAD (0x4) = 0x2c
-        #>
-
-        $bitmapInfoHeaderSize = 0x28
-        $bitmapInfoSize = $bitmapInfoHeaderSize + 0x4
-
-        $pBitmapInfoHeader = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($bitmapInfoSize)
-
-        # ZeroMemory
-        for ($i = 0; $i -lt $bitmapInfoSize; $i++)
-        {
-            [System.Runtime.InteropServices.Marshal]::WriteByte($pBitmapInfoHeader, $i, 0x0)    
-        }
-
-        [System.Runtime.InteropServices.Marshal]::WriteInt32($pBitmapInfoHeader, 0x0, $bitmapInfoHeaderSize) # biSize
-        [System.Runtime.InteropServices.Marshal]::WriteInt32($pBitmapInfoHeader, 0x4, $blockSize) # biWidth
-        [System.Runtime.InteropServices.Marshal]::WriteInt32($pBitmapInfoHeader, 0x8, $blockSize) # biHeight
-        [System.Runtime.InteropServices.Marshal]::WriteInt16($pBitmapInfoHeader, 0xc, 0x1) # biPlanes
-        [System.Runtime.InteropServices.Marshal]::WriteInt16($pBitmapInfoHeader, 0xe, 0x20) # biBitCount
-        
-        [IntPtr] $spaceBlock_DC = [GDI32]::CreateCompatibleDC(0)
-        [IntPtr] $spaceBlock_Ptr = [IntPtr]::Zero
-
-        [IntPtr] $spaceBlock_hBmp = [GDI32]::CreateDIBSection(
-            $spaceBlock_DC,
-            $pBitmapInfoHeader,
-            $DIB_RGB_COLORS,
-            [ref] $spaceBlock_Ptr,
-            [IntPtr]::Zero,
-            0
-        )
-
-        $null = [GDI32]::SelectObject($spaceBlock_DC, $spaceBlock_hBmp)
-
-        # Create our dirty rect DC
-        $dirtyRect_DC = [GDI32]::CreateCompatibleDC(0)
-
-        # SizeOf(DWORD) * 3 (SizeOf(Desktop) + SizeOf(Left) + SizeOf(Top))
-        $sizeOfUInt32 = [Runtime.InteropServices.Marshal]::SizeOf([System.Type][UInt32])
-        $struct = New-Object -TypeName byte[] -ArgumentList ($sizeOfUInt32 * 3)
-
-        $topLeftBlock = [System.Drawing.Point]::Empty
-        $bottomRightBlock = [System.Drawing.Point]::Empty   
-
-        $blockMemSize = ((($blockSize * 32) + 32) -band -bnot 32) / 8
-        $blockMemSize *= $blockSize 
-        $ptrBlockMemSize = [IntPtr]::New($blockMemSize)
-
-        $dirtyRect = New-Object -TypeName System.Drawing.Rectangle -ArgumentList 0, 0, $screenBounds.Width, $screenBounds.Height
-            
-        <#
-        $fps = 0
-        $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
-        #>
-
-        while ($Param.SafeHash.SessionActive)
-        {      
-            # Refresh our desktop mirror
-            $result = [GDI32]::BitBlt(
-                $mirrorDesktop_DC,
-                0,
-                0,
-                $screenBounds.Width,    
-                $screenBounds.Height,
-                $desktop_DC,
-                $screenBounds.Location.X,
-                $screenBounds.Location.Y,
-                $SRCCOPY
-            )        
-
-            if (-not $result)
-            {
-                continue
-            }
-                
-            $updated = $false
-
-            for ($y = 0; $y -lt $vertBlockCount; $y++)    
-            {                             
-                for ($x = 0; $x -lt $horzBlockCount; $x++)
-                {                                                                       
-                    $null = [GDI32]::BitBlt(
-                        $spaceBlock_DC,
-                        0,
-                        0,
-                        $blockSize,
-                        $blockSize,
-                        $mirrorDesktop_DC,
-                        ($x * $blockSize),
-                        ($y * $blockSize),
-                        $SRCCOPY
-                    );
-                                
-                    if ($firstIteration)
-                    {
-                        # Big bang occurs, tangent univers is getting created, where is Donnie?
-                        $SpaceGrid[$y][$x] = [Runtime.InteropServices.Marshal]::AllocHGlobal($blockMemSize)
-                                                                                                
-                        [Kernel32]::CopyMemory($SpaceGrid[$y][$x], $spaceBlock_Ptr, $ptrBlockMemSize)                        
-                    }
-                    else
-                    {                                                                        
-                        if ([MSVCRT]::memcmp($spaceBlock_Ptr, $SpaceGrid[$y][$x], $ptrBlockMemSize) -ne [IntPtr]::Zero)
-                        {
-                            [Kernel32]::CopyMemory($SpaceGrid[$y][$x], $spaceBlock_Ptr, $ptrBlockMemSize) 
-                            
-                            if (-not $updated)
-                            {                  
-                                # Initialize with the first dirty block coordinates                  
-                                $topLeftBlock.X = $x
-                                $topLeftBlock.Y = $y
-
-                                $bottomRightBlock = $topLeftBlock
-
-                                $updated = $true
-                            }
-                            else
-                            {    
-                                if ($x -lt $topLeftBlock.X)
-                                {
-                                    $topLeftBlock.X = $x
-                                }
-
-                                if ($y -lt $topLeftBlock.Y)
-                                {
-                                    $topLeftBlock.Y = $y
-                                }
-
-                                if ($x -gt $bottomRightBlock.X)
-                                {
-                                    $bottomRightBlock.X = $x
-                                }
-
-                                if ($y -gt $bottomRightBlock.Y)
-                                {
-                                    $bottomRightBlock.Y = $y
-                                }   
-                            }                                                              
-                        }                        
-                    }                                             
-                }                            
-            }     
-            
-            if ($updated)
-            {                
-                # Create new updated rectangle pointing to the dirty region (since last snapshot)
-                $dirtyRect.X = $topLeftBlock.X * $blockSize
-                $dirtyRect.Y = $topLeftBlock.Y * $blockSize
-
-                $dirtyRect.Width = (($bottomRightBlock.X * $blockSize) + $blockSize) - $dirtyRect.Left
-                $dirtyRect.Height = (($bottomRightBlock.Y * $blockSize) + $blockSize) - $dirtyRect.Top                
-            }            
-            
-            if ($updated -or $firstIteration)
-            {                           
-                try
-                {
-                    $dirtyRect_hBmp = [GDI32]::CreateCompatibleBitmap(
-                        $mirrorDesktop_DC,
-                        $dirtyRect.Width,
-                        $dirtyRect.Height
-                    )
-
-                    $null = [GDI32]::SelectObject($dirtyRect_DC, $dirtyRect_hBmp)
-
-                    $null = [GDI32]::BitBlt(
-                        $dirtyRect_DC,
-                        0,
-                        0,
-                        $dirtyRect.Width,
-                        $dirtyRect.Height,
-                        $mirrorDesktop_DC,
-                        $dirtyRect.X,
-                        $dirtyRect.Y,
-                        $SRCCOPY
-                    )
-
-                    # TODO: Find a faster alternative
-                    [System.Drawing.Bitmap] $updatedDesktop = [System.Drawing.Image]::FromHBitmap($dirtyRect_hBmp) 
-                
-                    $desktopStream = New-Object System.IO.MemoryStream                
-
-                    $updatedDesktop.Save($desktopStream, $encoder, $encoderParameters)                                 
-
-                    $desktopStream.Position = 0
-                    
-                    try 
-                    {         
-                        # One call please  
-                        [System.Runtime.InteropServices.Marshal]::WriteInt32($struct, 0x0, $desktopStream.Length)
-                        [System.Runtime.InteropServices.Marshal]::WriteInt32($struct, 0x4, $dirtyRect.Left)
-                        [System.Runtime.InteropServices.Marshal]::WriteInt32($struct, 0x8, $dirtyRect.Top)
-                                                
-                        $Param.Client.SSLStream.Write($struct , 0, $struct.Length)   
-                
-                        $binaryReader = New-Object System.IO.BinaryReader($desktopStream)
-                        do
-                        {       
-                            $bufferSize = ($desktopStream.Length - $desktopStream.Position)
-                            if ($bufferSize -gt $packetSize)
-                            {
-                                $bufferSize = $packetSize
-                            }                                                                      
-
-                            $Param.Client.SSLStream.Write($binaryReader.ReadBytes($bufferSize), 0, $bufferSize)                              
-                        } until ($desktopStream.Position -eq $desktopStream.Length)
-                    }
-                    catch
-                    {                         
-                        break 
-                    }
-                }
-                finally
-                {
-                    if ($dirtyRect_hBmp -ne [IntPtr]::Zero)
-                    {
-                        $null = [GDI32]::DeleteObject($dirtyRect_hBmp)
-                    }
-
-                    if ($desktopStream)
-                    {
-                        $desktopStream.Dispose()
-                    }   
-
-                    if ($updatedDesktop)             
-                    {
-                        $updatedDesktop.Dispose()
-                    }
-                }
-            }
-
-            if ($firstIteration)
-            {
-                $firstIteration = $false
-            }
-
-            <#
-            $fps++
-            if ($Stopwatch.ElapsedMilliseconds -ge 1000)
-            {
-                $HostSyncHash.host.ui.WriteLine($fps)
-                $fps = 0
-
-                $Stopwatch.Restart()
-            }
-            #>
-        }
-    }
-    catch {}
-    finally
-    {       
-        # Free allocated resources 
-        if ($mirrorDesktop_DC -ne [IntPtr]::Zero)
-        {
-            $null = [GDI32]::DeleteDC($mirrorDesktop_DC)
-        }
-    
-        if ($mirrorDesktop_hBmp -ne [IntPtr]::Zero)
-        {
-            $null = [GDI32]::DeleteObject($mirrorDesktop_hBmp)
-        }     
-
-        if ($spaceBlock_DC -ne [IntPtr]::Zero)      
-        {
-            $null = [GDI32]::DeleteDC($spaceBlock_DC)
-        }
-
-        if ($spaceBlock_hBmp -ne [IntPtr]::Zero)
-        {
-            $null = [GDI32]::DeleteObject($spaceBlock_hBmp)
-        }
-
-        if ($dirtyRect_DC -ne [IntPtr]::Zero)
-        {
-            $null = [GDI32]::DeleteDC($dirtyRect_DC)
-        }
-
-        if ($pBitmapInfoHeader -ne [IntPtr]::Zero)
-        {
-            [System.Runtime.InteropServices.Marshal]::FreeHGlobal($pBitmapInfoHeader)
-        }
-
-        if ($desktop_DC -ne [IntPtr]::Zero)
-        {
-            $null = [User32]::ReleaseDC([User32]::GetDesktopWindow(), $desktop_DC)    
-        }
-
-        # Tangent univers big crunch
-        for ($y = 0; $y -lt $vertBlockCount; $y++)    
-        {                             
-            for ($x = 0; $x -lt $horzBlockCount; $x++)
-            {                          
-                [Runtime.InteropServices.Marshal]::FreeHGlobal($SpaceGrid[$y][$x])           
-            }
-        }
     }
 }
 
-$global:IngressEventScriptBlock = {    
-    enum MouseFlags {
-        MOUSEEVENTF_ABSOLUTE = 0x8000
-        MOUSEEVENTF_LEFTDOWN = 0x0002
-        MOUSEEVENTF_LEFTUP = 0x0004
-        MOUSEEVENTF_MIDDLEDOWN = 0x0020
-        MOUSEEVENTF_MIDDLEUP = 0x0040
-        MOUSEEVENTF_MOVE = 0x0001
-        MOUSEEVENTF_RIGHTDOWN = 0x0008
-        MOUSEEVENTF_RIGHTUP = 0x0010
-        MOUSEEVENTF_WHEEL = 0x0800
-        MOUSEEVENTF_XDOWN = 0x0080
-        MOUSEEVENTF_XUP = 0x0100
-        MOUSEEVENTF_HWHEEL = 0x01000
-    }
+# -------------------------------------------------------------------------------
 
-    enum InputEvent {
-        Keyboard = 0x1
-        MouseClickMove = 0x2
-        MouseWheel = 0x3
-        KeepAlive = 0x4        
-        ClipboardUpdated = 0x5
-    }
-
-    enum MouseState {
-        Up = 0x1
-        Down = 0x2
-        Move = 0x3
-    }
-
-    enum ClipboardMode {
-        Disabled = 1
-        Receive = 2
-        Send = 3
-        Both = 4
-    }  
-    
-    $SM_CXSCREEN = 0
-    $SM_CYSCREEN = 1
-
-    function Set-MouseCursorPos
-    {
-        param(
-            [int] $X = 0,
-            [int] $Y = 0
-        )
-
-        $x_screen = [User32]::GetSystemMetrics($SM_CXSCREEN)
-        $y_screen = [User32]::GetSystemMetrics($SM_CYSCREEN)
-
-        [User32]::mouse_event(
-            [int][MouseFlags]::MOUSEEVENTF_MOVE -bor [int][MouseFlags]::MOUSEEVENTF_ABSOLUTE,
-            (65535 * $X) / $x_screen,
-            (65535 * $Y) / $y_screen,
-            0,
-            0
-        );
-            
-    }    
-
-    while ($true)                    
-    {             
-        try 
-        {            
-            $jsonEvent = $Param.Reader.ReadLine()
-        }
-        catch
-        { 
-            # ($_ | Out-File "c:\temp\debug.txt")
-            
-            break 
-        }     
-        
-        try
-        {
-            $aEvent = $jsonEvent | ConvertFrom-Json
-        }
-        catch { continue }
-
-        if (-not ($aEvent.PSobject.Properties.name -match "Id"))
-        { continue }                                             
-         
-        switch ([InputEvent] $aEvent.Id)
-        {
-            # Keyboard Input Simulation
-            ([InputEvent]::Keyboard)
-            {      
-                if ($Param.ViewOnly)              
-                { continue }
-
-                if (-not ($aEvent.PSobject.Properties.name -match "Keys"))
-                { break }
-
-                [System.Windows.Forms.SendKeys]::SendWait($aEvent.Keys)  
-
-                break  
-            }
-
-            # Mouse Move & Click Simulation
-            ([InputEvent]::MouseClickMove)
-            {          
-                if ($Param.ViewOnly)              
-                { continue }
-
-                if (-not ($aEvent.PSobject.Properties.name -match "Type"))
-                { break }
-
-                switch ([MouseState] $aEvent.Type)
-                {
-                    # Mouse Down/Up
-                    {($_ -eq ([MouseState]::Down)) -or ($_ -eq ([MouseState]::Up))}
-                    {
-                        #[User32]::SetCursorPos($aEvent.X, $aEvent.Y)   
-                        Set-MouseCursorPos -X $aEvent.X -Y $aEvent.Y
-
-                        $down = ($_ -eq ([MouseState]::Down))
-
-                        $mouseCode = [int][MouseFlags]::MOUSEEVENTF_LEFTDOWN
-                        if (-not $down)
-                        {
-                            $mouseCode = [int][MouseFlags]::MOUSEEVENTF_LEFTUP
-                        }                                            
-
-                        switch($aEvent.Button)
-                        {                        
-                            "Right"
-                            {
-                                if ($down)
-                                {
-                                    $mouseCode = [int][MouseFlags]::MOUSEEVENTF_RIGHTDOWN
-                                }
-                                else
-                                {
-                                    $mouseCode = [int][MouseFlags]::MOUSEEVENTF_RIGHTUP
-                                }
-
-                                break
-                            }      
-
-                            "Middle"                      
-                            {
-                                if ($down)
-                                {
-                                    $mouseCode = [int][MouseFlags]::MOUSEEVENTF_MIDDLEDOWN
-                                }
-                                else
-                                {
-                                    $mouseCode = [int][MouseFlags]::MOUSEEVENTF_MIDDLEUP
-                                }
-                            }                            
-                        }                     
-                        [User32]::mouse_event($mouseCode, 0, 0, 0, 0);
-
-                        break
-                    }
-
-                    # Mouse Move
-                    ([MouseState]::Move)
-                    {
-                        if ($Param.ViewOnly)              
-                        { continue }
-
-                        #[User32]::SetCursorPos($aEvent.X, $aEvent.Y)
-                        Set-MouseCursorPos -X $aEvent.X -Y $aEvent.Y
-
-                        break
-                    }                    
-                }                
-
-                break                
-            }        
-
-            # Mouse Wheel Simulation
-            ([InputEvent]::MouseWheel) {
-                if ($Param.ViewOnly)              
-                { continue }
-
-                [User32]::mouse_event([int][MouseFlags]::MOUSEEVENTF_WHEEL, 0, 0, $aEvent.Delta, 0);
-
-                break
-            }    
-
-            # Clipboard Update
-            ([InputEvent]::ClipboardUpdated)
-            {
-                if ($Param.ViewOnly)
-                { continue }
-
-                if ($Param.Clipboard -eq ([ClipboardMode]::Disabled) -or $Param.Clipboard -eq ([ClipboardMode]::Send))
-                { continue }
-
-                if (-not ($aEvent.PSobject.Properties.name -match "Text"))
-                { continue } 
-
-                $HostSyncHash.ClipboardText = $aEvent.Text
-                
-                Set-Clipboard -Value $aEvent.Text
-            }
-        }
-    }    
-}
-
-$global:EgressEventScriptBlock = {
-
-    enum CursorType {
-        IDC_APPSTARTING = 32650
-        IDC_ARROW = 32512
-        IDC_CROSS = 32515
-        IDC_HAND = 32649
-        IDC_HELP = 32651
-        IDC_IBEAM = 32513
-        IDC_ICON = 32641
-        IDC_NO = 32648
-        IDC_SIZE = 32640
-        IDC_SIZEALL = 32646
-        IDC_SIZENESW = 32643
-        IDC_SIZENS = 32645
-        IDC_SIZENWSE = 32642
-        IDC_SIZEWE = 32644
-        IDC_UPARROW = 32516
-        IDC_WAIT = 32514
-    }
-
-    enum OutputEvent {
-        KeepAlive = 0x1
-        MouseCursorUpdated = 0x2  
-        ClipboardUpdated = 0x3
-        DesktopActive = 0x4
-        DesktopInactive = 0x5     
-    }
-
-    enum ClipboardMode {
-        Disabled = 1
-        Receive = 2
-        Send = 3
-        Both = 4
-    }
-
-    function Initialize-Cursors
-    {
-        <#
-            .SYNOPSIS
-                Initialize different Windows supported mouse cursors.
-
-            .DESCRIPTION
-                Unfortunately, there is not WinAPI to get current mouse cursor icon state (Ex: as a flag) 
-                but only current mouse cursor icon (via its handle).
-
-                One solution, is to resolve each supported mouse cursor handles (HCURSOR) with corresponding name 
-                in a hashtable and then compare with GetCursorInfo() HCURSOR result.
-        #>
-        $cursors = @{}
-
-        foreach ($cursorType in [CursorType].GetEnumValues()) { 
-            $result = [User32]::LoadCursorA(0, [int]$cursorType)
-
-            if ($result -gt 0)
-            {
-                $cursors[[string] $cursorType] = $result
-            }
-        }
-
-        return $cursors
-    }        
-
-    function Get-GlobalMouseCursorIconHandle
-    {
-        <#
-            .SYNOPSIS
-                Return global mouse cursor handle.
-            .DESCRIPTION
-                For this project I really want to avoid using "inline c#" but only pure PowerShell Code.
-                I'm using a Hackish method to retrieve the global Windows cursor info by playing by hand
-                with memory to prepare and read CURSORINFO structure.
-                ---
-                typedef struct tagCURSORINFO {
-                    DWORD   cbSize;       // Size: 0x4
-                    DWORD   flags;        // Size: 0x4
-                    HCURSOR hCursor;      // Size: 0x4 (32bit) , 0x8 (64bit)
-                    POINT   ptScreenPos;  // Size: 0x8
-                } CURSORINFO, *PCURSORINFO, *LPCURSORINFO;
-                Total Size of Structure:
-                    - [32bit] 20 Bytes
-                    - [64bit] 24 Bytes
-        #>
-
-        # sizeof(cbSize) + sizeof(flags) + sizeof(ptScreenPos) = 16
-        $structSize = [IntPtr]::Size + 16
-
-        $cursorInfo = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($structSize)
-        try
-        {
-            # ZeroMemory(@cursorInfo, SizeOf(tagCURSORINFO))
-            for ($i = 0; $i -lt $structSize; $i++)
-            {
-                [System.Runtime.InteropServices.Marshal]::WriteByte($cursorInfo, $i, 0x0)    
-            }
-
-            [System.Runtime.InteropServices.Marshal]::WriteInt32($cursorInfo, 0x0, $structSize)
-
-            if ([User32]::GetCursorInfo($cursorInfo))
-            {
-                $hCursor = [System.Runtime.InteropServices.Marshal]::ReadInt64($cursorInfo, 0x8)
-
-                return $hCursor
-            }    
-
-            <#for ($i = 0; $i -lt $structSize; $i++)
-            {
-                $offsetValue = [System.Runtime.InteropServices.Marshal]::ReadByte($cursorInfo, $i)
-                Write-Host "Offset: ${i} -> " -NoNewLine
-                Write-Host $offsetValue -ForegroundColor Green -NoNewLine
-                Write-Host ' (' -NoNewLine
-                Write-Host ('0x{0:x}' -f $offsetValue) -ForegroundColor Cyan -NoNewLine
-                Write-Host ')'
-            }#>
-        }
-        finally
-        {
-            [System.Runtime.InteropServices.Marshal]::FreeHGlobal($cursorInfo)
-        }
-    }
-
-    function Send-Event
-    {
-        <#
-            .SYNOPSIS
-                Send an event to remote peer.
-
-            .PARAMETER AEvent
-                Type: Enum
-                Default: None
-                Description: The event to send to remote viewer.
-
-            .PARAMETER Data
-                Type: PSCustomObject
-                Default: None
-                Description: Additional information about the event.
-        #>
-        param (            
-            [Parameter(Mandatory=$True)]
-            [OutputEvent] $AEvent,
-
-            [PSCustomObject] $Data = $null
-        )
-
-        try 
-        {
-            if (-not $Data)
-            {
-                $Data = New-Object -TypeName PSCustomObject -Property @{
-                    Id = $AEvent 
-                }
-            }
-            else
-            {
-                $Data | Add-Member -MemberType NoteProperty -Name "Id" -Value $AEvent
-            }            
-
-            $Param.Writer.WriteLine(($Data | ConvertTo-Json -Compress))  
-
-            return $true
-        }
-        catch 
-        { 
-            return $false
-        }
-    }
-
-    $cursors = Initialize-Cursors
-
-    $oldCursor = 0
-    
-    # Feature not yet available
-    #$desktopIsActive = [User32]::GetForegroundWindow() -ne [IntPtr]::Zero
-
-    $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
-
-    while ($true)
-    {
-        # Events that occurs every seconds needs to be placed bellow.
-        # If no event has occured during this second we send a Keep-Alive signal to
-        # remote peer and detect a potential socket disconnection.
-        if ($stopWatch.ElapsedMilliseconds -ge 1000)
-        {
-            try
-            {
-                $eventTriggered = $false
-
-                # Clipboard Update Detection
-                if (
-                    ($Param.Clipboard -eq ([ClipboardMode]::Both) -or $Param.Clipboard -eq ([ClipboardMode]::Send)) `
-                    -and (-not $Param.ViewOnly)
-                )
-                {
-                    # IDEA: Check for existing clipboard change event or implement a custom clipboard
-                    # change detector using "WM_CLIPBOARDUPDATE" for example (WITHOUT INLINE C#)
-                    # It is not very important but it would avoid calling "Get-Clipboard" every seconds.                
-                    $currentClipboard = (Get-Clipboard -Raw)
-
-                    if ($currentClipboard -and $currentClipboard -cne $HostSyncHash.ClipboardText)
-                    {                    
-                        $data = New-Object -TypeName PSCustomObject -Property @{                
-                            Text = $currentClipboard
-                        } 
-
-                        if (-not (Send-Event -AEvent ([OutputEvent]::ClipboardUpdated) -Data $data))
-                        { break }
-
-                        $HostSyncHash.ClipboardText = $currentClipboard
-
-                        $eventTriggered = $true
-                    }
-                }
-
-                # Desktop Active / Inactive Detection
-                <#$desktopActiveProbe = [User32]::GetForegroundWindow() -ne [IntPtr]::Zero
-                if ($desktopIsActive -ne $desktopActiveProbe)
-                {
-                    if ($desktopActiveProbe)
-                    {
-                        $aEvent = [OutputEvent]::DesktopActive
-                    }
-                    else
-                    {
-                        $aEvent = [OutputEvent]::DesktopInactive
-                    }
-
-                    #if (-not (Send-Event -AEvent $aEvent))
-                    #{ break }
-
-                    $desktopIsActive = $desktopActiveProbe
-
-                    #$eventTriggered = $true
-                }#>
-                
-                # Send a Keep-Alive if during this second iteration nothing happened.
-                if (-not $eventTriggered)
-                {
-                    if (-not (Send-Event -AEvent ([OutputEvent]::KeepAlive)))
-                    { break }
-                }
-            }
-            finally
-            {
-                $stopWatch.Restart()
-            }
-        }
-
-        # Monitor for global mouse cursor change
-        # Update Frequently (Maximum probe time to be efficient: 50ms)
-        $currentCursor = Get-GlobalMouseCursorIconHandle
-        if ($currentCursor -ne 0 -and $currentCursor -ne $oldCursor)
-        {   
-            $cursorTypeName = ($cursors.GetEnumerator() | Where-Object { $_.Value -eq $currentCursor }).Key
-
-            $data = New-Object -TypeName PSCustomObject -Property @{                
-                Cursor = $cursorTypeName
-            }             
-
-            if (-not (Send-Event -AEvent ([OutputEvent]::MouseCursorUpdated) -Data $data))
-            { break }
-
-            $oldCursor = $currentCursor
-        }    
-
-        Start-Sleep -Milliseconds 50 
-    } 
-
-    $stopWatch.Stop()
-}
-
-function New-RunSpace
+function Test-WinAPI
 {
     <#
         .SYNOPSIS
-            Create a new PowerShell Runspace.
+            Check if Windows API is available on current system.
 
         .DESCRIPTION
-            Notice: the $host variable is used for debugging purpose to write on caller PowerShell
-            Terminal.
+            Bellow is another technique to check if a Win32 API function is available on current system.
+            But I prefer to limit crashing code to validate something.
+            ```
+                try
+                {
+                    $null = # CALL TO WIN32 API FUNCTION
 
-        .PARAMETER ScriptBlock
-            Type: ScriptBlock
-            Default: None
-            Description: Instructions to execute in new runspace.
-
-        .PARAMETER Param
-            Type: PSCustomObject
-            Default: None
-            Description: Object to attach in runspace context.
-
-        .PARAMETER LogonUI
-            Type: Boolean
-            Default: False
-            Description: 
-                New thread will attach its desktop to LogonUI / Winlogon 
-                (Requires SYSTEM Privilege on active session)
-
-        .EXAMPLE
-            New-RunSpace -Client $newClient -ScriptBlock { Start-Sleep -Seconds 10 }
+                    return $true
+                }
+                catch
+                {
+                    return $false
+                }
+            ```
     #>
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $LibraryName,
 
-    param(
-        [Parameter(Mandatory=$True)]
-        [ScriptBlock] $ScriptBlock,
+        [Parameter(Mandatory = $true)]
+        [string] $ApiName
+    )
 
-        [PSCustomObject] $Param = $null,
-        [bool] $LogonUI = $false
-    )   
-
-    $runspace = [RunspaceFactory]::CreateRunspace()
-    $runspace.ThreadOptions = "UseNewThread"
-    $runspace.ApartmentState = "STA"
-    $runspace.Open()                   
-
-    if ($Param)
+    $hModule = [Kernel32]::LoadLibrary($LibraryName)
+    try
     {
-        $runspace.SessionStateProxy.SetVariable("Param", $Param) 
+        if ($hModule -eq [IntPtr]::Zero)
+        {
+            return $false
+        }
+
+        $proc = [Kernel32]::GetProcAddress($hModule, $ApiName)
+
+        return $proc -ne [IntPtr]::Zero
     }
-
-    $runspace.SessionStateProxy.SetVariable("HostSyncHash", $global:HostSyncHash)    
-    
-    $powershell = [PowerShell]::Create()
-
-    if ($LogonUI)
+    finally
     {
-        # Runspace prelude to update new thread desktop before something happens.  
-        # This code will switch new thread desktop from "WinSta0/default" to "WinSta0/winlogon".
-        # It requires to be "NT AUTHORITY/SYSTEM"
-        $null = $powershell.AddScript({    
-            $MAXIMUM_ALLOWED = 0x02000000;   
-
-            $winLogonDesktop = [User32]::OpenDesktop("winlogon", 0, $false, $MAXIMUM_ALLOWED);
-            if ($winLogonDesktop -eq [IntPtr]::Zero)
-            {                
-                return  
-            }
-            
-            if (-not [User32]::SetThreadDesktop($winLogonDesktop))
-            {
-                [User32]::CloseDesktop($winLogonDesktop)
-
-                return
-            }                    
-        })
-    }
-
-    $null = $powershell.AddScript($ScriptBlock)
-
-    $powershell.Runspace = $runspace
-
-    $asyncResult = $powershell.BeginInvoke()
-
-    return New-Object PSCustomObject -Property @{
-        Runspace = $runspace
-        PowerShell = $powershell
-        AsyncResult = $asyncResult
+        $null = [Kernel32]::FreeLibrary($hModule)
     }
 }
 
-class ClientIO {  
+# -------------------------------------------------------------------------------
+
+function Test-Administrator
+{
+    <#
+        .SYNOPSIS
+            Check if current user is administrator.
+    #>
+    $windowsPrincipal = New-Object Security.Principal.WindowsPrincipal(
+        [Security.Principal.WindowsIdentity]::GetCurrent()
+    )
+
+    return $windowsPrincipal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+}
+
+# ----------------------------------------------------------------------------- #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+#  Local Classes                                                                #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+# ----------------------------------------------------------------------------- #
+
+class ClientIO {
     [System.Net.Sockets.TcpClient] $Client = $null
     [System.IO.StreamWriter] $Writer = $null
     [System.IO.StreamReader] $Reader = $null
-    [System.Net.Security.SslStream] $SSLStream = $null  
+    [System.Net.Security.SslStream] $SSLStream = $null
 
 
     ClientIO(
@@ -1620,12 +2493,12 @@ class ClientIO {
         {
             throw "ClientIO Class requires both a valid TcpClient and X509Certificate2."
         }
-        
+
         $this.Client = $Client
 
         Write-Verbose "Create new SSL Stream..."
 
-        $this.SSLStream = New-Object System.Net.Security.SslStream($this.Client.GetStream(), $false)                
+        $this.SSLStream = New-Object System.Net.Security.SslStream($this.Client.GetStream(), $false)
 
         if ($UseTLSv1_3)
         {
@@ -1642,7 +2515,7 @@ class ClientIO {
             $false,
             $TLSVersion,
             $false
-        )        
+        )
 
         if (-not $this.SSLStream.IsEncrypted)
         {
@@ -1655,11 +2528,11 @@ class ClientIO {
         Write-Verbose "Open communication channels..."
 
         $this.Writer = New-Object System.IO.StreamWriter($this.SSLStream)
-        $this.Writer.AutoFlush = $true        
+        $this.Writer.AutoFlush = $true
 
-        $this.Reader = New-Object System.IO.StreamReader($this.SSLStream)      
+        $this.Reader = New-Object System.IO.StreamReader($this.SSLStream)
 
-        Write-Verbose "Connection ready for use."  
+        Write-Verbose "Connection ready for use."
     }
 
     [bool] Authentify([SecureString] $SecurePassword) {
@@ -1670,14 +2543,14 @@ class ClientIO {
             .PARAMETER Password
                 Type: SecureString
                 Default: None
-                Description: Secure String object containing the password.                
+                Description: Secure String object containing the password.
 
             .EXAMPLE
                 .Authentify((ConvertTo-SecureString -String "urCompl3xP@ssw0rd" -AsPlainText -Force))
-        #>        
+        #>
         try
-        { 
-            if (-not $SecurePassword) { 
+        {
+            if (-not $SecurePassword) {
                 throw "During client authentication, a password cannot be blank."
             }
 
@@ -1686,11 +2559,11 @@ class ClientIO {
             $candidate = -join ((1..128) | ForEach-Object {Get-Random -input ([char[]](33..126))})
             $candidate = Get-SHA512FromString -String $candidate
 
-            $challengeSolution = Resolve-AuthenticationChallenge -Candidate $candidate -SecurePassword $SecurePassword   
+            $challengeSolution = Resolve-AuthenticationChallenge -Candidate $candidate -SecurePassword $SecurePassword
 
             Write-Verbose "@Challenge:"
             Write-Verbose "Candidate: ""${candidate}"""
-            Write-Verbose "Solution: ""${challengeSolution}"""  
+            Write-Verbose "Solution: ""${challengeSolution}"""
             Write-Verbose "---"
 
             $this.Writer.WriteLine($candidate)
@@ -1699,17 +2572,17 @@ class ClientIO {
 
             $challengeReply = $this.ReadLine(5 * 1000)
 
-            Write-Verbose "Replied solution: ""${challengeReply}"""            
+            Write-Verbose "Replied solution: ""${challengeReply}"""
 
             # Challenge solution is a Sha512 Hash so comparison doesn't need to be sensitive (-ceq or -cne)
             if ($challengeReply -ne $challengeSolution)
-            {            
+            {
                 $this.Writer.WriteLine(([ProtocolCommand]::Fail))
 
                 throw "Client challenge solution does not match our solution."
             }
             else
-            {            
+            {
                 $this.Writer.WriteLine(([ProtocolCommand]::Success))
 
                 Write-Verbose "Password Authentication Success"
@@ -1717,7 +2590,7 @@ class ClientIO {
                 return 280121 # True
             }
         }
-        catch 
+        catch
         {
             throw "Password Authentication Failed. Reason: `r`n $($_)"
         }
@@ -1733,36 +2606,36 @@ class ClientIO {
 
     [string] LocalAddress() {
         return $this.Client.Client.LocalEndPoint.Address
-    }    
+    }
 
     [int] LocalPort() {
         return $this.Client.Client.LocalEndPoint.Port
     }
-    
-    [string] ReadLine([int] $Timeout) 
+
+    [string] ReadLine([int] $Timeout)
     {
         <#
             .SYNOPSIS
                 Read string message from remote peer with timeout support.
-    
+
             .PARAMETER Timeout
-                Type: Integer                
+                Type: Integer
                 Description: Maximum period of time to wait for incomming data.
         #>
         $defautTimeout = $this.SSLStream.ReadTimeout
         try
         {
             $this.SSLStream.ReadTimeout = $Timeout
-    
-            return $this.Reader.ReadLine()        
+
+            return $this.Reader.ReadLine()
         }
         finally
         {
             $this.SSLStream.ReadTimeout = $defautTimeout
-        }        
-    }    
+        }
+    }
 
-    [string] ReadLine() 
+    [string] ReadLine()
     {
         <#
             .SYNOPSIS
@@ -1780,7 +2653,7 @@ class ClientIO {
 
             .PARAMETER Object
                 Type: PSCustomObject
-                Description: Object to be serialized in JSON.                
+                Description: Object to be serialized in JSON.
         #>
 
         $this.Writer.WriteLine(($Object | ConvertTo-Json -Compress))
@@ -1791,12 +2664,12 @@ class ClientIO {
         $this.Writer.WriteLine($Value)
     }
 
-    [void] Close() {    
+    [void] Close() {
         <#
             .SYNOPSIS
                 Release streams and client.
         #>
-        
+
         if ($this.Writer)
         {
             $this.Writer.Close()
@@ -1813,11 +2686,13 @@ class ClientIO {
         }
 
         if ($this.Client)
-        {        
+        {
             $this.Client.Close()
         }
     }
 }
+
+# -------------------------------------------------------------------------------
 
 class TcpListenerEx : System.Net.Sockets.TcpListener
 {
@@ -1826,36 +2701,38 @@ class TcpListenerEx : System.Net.Sockets.TcpListener
 
     [bool] Active()
     {
-        return $this.Active     
+        return $this.Active
     }
 }
 
-class ServerIO {        
-    [TcpListenerEx] $Server = $null    
-    [System.IO.StreamWriter] $Writer = $null
-    [System.IO.StreamReader] $Reader = $null    
+# -------------------------------------------------------------------------------
 
-    ServerIO() 
+class ServerIO {
+    [TcpListenerEx] $Server = $null
+    [System.IO.StreamWriter] $Writer = $null
+    [System.IO.StreamReader] $Reader = $null
+
+    ServerIO()
     { }
 
     [void] Listen(
         [string] $ListenAddress,
         [int] $ListenPort
-    ) 
-    {                         
+    )
+    {
         if ($this.Server)
         {
-            $this.Close()            
-        }        
+            $this.Close()
+        }
 
         $this.Server = New-Object TcpListenerEx(
             $ListenAddress,
             $ListenPort
-        )            
-                
+        )
+
         $this.Server.Start()
 
-        Write-Verbose "Listening on ""$($ListenAddress):$($ListenPort)""..."                    
+        Write-Verbose "Listening on ""$($ListenAddress):$($ListenPort)""..."
     }
 
     [ClientIO] PullClient(
@@ -1875,15 +2752,15 @@ class ServerIO {
                 Type: Integer
                 Description:
                     By default AcceptTcpClient() will block current thread until a client connects.
-                    
+
                     Using Timeout and a cool technique, you can stop waiting for client after a certain amount
-                    of time (In Milliseconds)                
+                    of time (In Milliseconds)
 
                     If Timeout is greater than 0 (Milliseconds) then connection timeout is enabled.
 
                     Other method: AsyncWaitHandle.WaitOne([timespan])'h:m:s') -eq $true|$false with BeginAcceptTcpClient(...)
         #>
-            
+
         if (-not (Test-PasswordComplexity -SecurePasswordCandidate $SecurePassword))
         {
             throw "Client socket pull request requires a complex password to be set."
@@ -1901,22 +2778,22 @@ class ServerIO {
             }
         }
 
-        $socket = $this.Server.AcceptTcpClient()          
+        $socket = $this.Server.AcceptTcpClient()
 
-        $client = [ClientIO]::New(            
+        $client = [ClientIO]::New(
             $socket,
             $Certificate,
             $UseTLSv13
         )
         try
-        {            
-            Write-Verbose "New client socket connected from: ""$($client.RemoteAddress())""."              
+        {
+            Write-Verbose "New client socket connected from: ""$($client.RemoteAddress())""."
 
             $authenticated = ($client.Authentify($SecurePassword) -eq 280121)
             if (-not $authenticated)
             {
                 throw "Access Denied."
-            }                               
+            }
         }
         catch
         {
@@ -1940,17 +2817,17 @@ class ServerIO {
         }
     }
 
-    [void] Close() 
+    [void] Close()
     {
         <#
             .SYNOPSIS
                 Stop listening and release TcpListener object.
         #>
         if ($this.Server)
-        {                     
+        {
             if ($this.Server.Active)
-            {                
-                $this.Server.Stop()                
+            {
+                $this.Server.Stop()
             }
 
             $this.Server = $null
@@ -1960,19 +2837,21 @@ class ServerIO {
     }
 }
 
+# -------------------------------------------------------------------------------
+
 class ServerSession {
-    [string] $Id = ""   
+    [string] $Id = ""
     [bool] $ViewOnly = $false
     [ClipboardMode] $Clipboard = [ClipboardMode]::Both
     [string] $ViewerLocation = ""
-    [bool] $LogonUI = $false
-    
+    [bool] $logonUIAccess = $false
+
     [System.Collections.Generic.List[PSCustomObject]]
     $WorkerThreads = @()
 
     [System.Collections.Generic.List[ClientIO]]
     $Clients = @()
-        
+
     $SafeHash = [HashTable]::Synchronized(@{
         SessionActive = $true
     })
@@ -1981,16 +2860,20 @@ class ServerSession {
         [bool] $ViewOnly,
         [ClipboardMode] $Clipboard,
         [string] $ViewerLocation
-    ) 
+    )
     {
-        $this.Id = (SHA512FromString -String (-join ((1..128) | ForEach-Object {Get-Random -input ([char[]](33..126))})))    
-        
+        $this.Id = (SHA512FromString -String (-join ((1..128) | ForEach-Object {Get-Random -input ([char[]](33..126))})))
+
         $this.ViewOnly = $ViewOnly
         $this.Clipboard = $Clipboard
         $this.ViewerLocation = $ViewerLocation
+
+        # Check if current arcane server is running under NT AUTHORITY\SYSTEM
+        # This is required to capture secure desktop (Winlogon)
+        $this.logonUIAccess = [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
     }
 
-    [bool] CompareSession([string] $Id) 
+    [bool] CompareSession([string] $Id)
     {
         <#
             .SYNOPSIS
@@ -2012,14 +2895,31 @@ class ServerSession {
             .PARAMETER Client
                 Type: ClientIO
                 Description: Established connection with a remote peer.
-        #>        
-        $param = New-Object -TypeName PSCustomObject -Property @{                      
-            Client = $Client            
-            SafeHash = $this.SafeHash
-        }
-        
-        $this.WorkerThreads.Add((New-RunSpace -ScriptBlock $global:DesktopStreamScriptBlock -Param $param -LogonUI $this.LogonUI))       
-        
+        #>
+
+        $this.WorkerThreads.Add(
+            (
+                New-RunSpace -RunspaceApartmentState "MTA" -ScriptBlocks @(
+                    # Runspace Required Functions
+                    $global:WinAPI_Const_ScriptBlock,
+                    $global:WinAPIException_Class_ScriptBlock,
+                    $global:GetUserObjectInformation_Func_ScriptBlock,
+                    $global:GetInputDesktopName_Func_ScriptBlock,
+                    $global:GetCurrentThreadDesktopName_Func_ScriptBlock,
+                    $global:UpdateCurrentThreadDesktopWithInputDesktop_Func_ScriptBlock,
+
+                    # Runspace Entrypoint
+                    $global:DesktopStreamScriptBlock
+                ) -Params @{
+                    # Required Runspace Variables
+                    "HostSyncHash" = $global:HostSyncHash
+                    "Client" = $Client
+                    "SafeHash" = $this.SafeHash
+                    "LogonUIAccess" = $this.logonUIAccess
+                }
+            )
+        )
+
         ###
 
         $this.Clients.Add($Client)
@@ -2036,24 +2936,63 @@ class ServerSession {
                 Description: Established connection with a remote peer.
         #>
 
-        $param = New-Object -TypeName PSCustomObject -Property @{                                                                           
-            Writer = $Client.Writer
-            Clipboard = $this.Clipboard
-            SafeHash = $this.SafeHash
+        if ($this.ViewOnly)
+        {
+            # Ignore demand for event worker if session is view only.
+            return
         }
 
-        $this.WorkerThreads.Add((New-RunSpace -ScriptBlock $global:EgressEventScriptBlock -Param $param -LogonUI $this.LogonUI))    
-        
+        $this.WorkerThreads.Add(
+            (
+                New-RunSpace -ScriptBlocks @(
+                    # Runspace Entrypoint
+                    $global:EgressEventScriptBlock
+                ) -Params @{
+                    # Required Runspace Variables
+                    "HostSyncHash" = $global:HostSyncHash
+                    "Writer" = $Client.Writer
+                    "Clipboard" = $this.Clipboard
+                    "SafeHash" = $this.SafeHash
+                    "LogonUIAccess" = $this.logonUIAccess
+                }
+            )
+        )
+
         ###
 
-        $param = New-Object -TypeName PSCustomObject -Property @{                                                                           
-            Reader = $Client.Reader   
-            Clipboard = $this.Clipboard
-            ViewOnly = $this.ViewOnly   
-            SafeHash = $this.SafeHash       
+        if ($this.LogonUIAccess)
+        {
+            $runspaceApartmentState = "MTA"
         }
-                        
-        $this.WorkerThreads.Add((New-RunSpace -ScriptBlock $global:IngressEventScriptBlock -Param $param -LogonUI $this.LogonUI)) 
+        else
+        {
+            $runspaceApartmentState = "STA"
+        }
+
+        $this.WorkerThreads.Add(
+            (
+                New-RunSpace -RunspaceApartmentState $runspaceApartmentState -ScriptBlocks @(
+                    # Runspace Required Functions
+                    $global:WinAPI_Const_ScriptBlock,
+                    $global:WinAPIException_Class_ScriptBlock,
+                    $global:GetUserObjectInformation_Func_ScriptBlock,
+                    $global:GetInputDesktopName_Func_ScriptBlock,
+                    $global:GetCurrentThreadDesktopName_Func_ScriptBlock,
+                    $global:UpdateCurrentThreadDesktopWithInputDesktop_Func_ScriptBlock,
+                    $global:HandleInputEvent_ScriptBlock,
+
+                    # Runspace Entrypoint
+                    $global:IngressEventScriptBlock
+                ) -Params @{
+                    # Required Runspace Variables
+                    "HostSyncHash" = $global:HostSyncHash
+                    "Reader" = $Client.Reader
+                    "Clipboard" = $this.Clipboard
+                    "SafeHash" = $this.SafeHash
+                    "LogonUIAccess" = $this.logonUIAccess
+                }
+            )
+        )
 
         ###
 
@@ -2067,7 +3006,7 @@ class ServerSession {
                 Check if session integrity is still respected.
 
             .DESCRIPTION
-                We consider that a dead session, is a session with at least one worker that has completed his 
+                We consider that a dead session, is a session with at least one worker that has completed his
                 tasks.
 
                 This will notify other workers that something happened (disconnection, fatal exception).
@@ -2078,10 +3017,10 @@ class ServerSession {
             if ($worker.AsyncResult.IsCompleted)
             {
                 $this.Close()
-                
+
                 break
-            }                 
-        }  
+            }
+        }
     }
 
     [void] Close()
@@ -2097,7 +3036,7 @@ class ServerSession {
 
         Write-Verbose "Close associated peers..."
 
-        # Close connection with remote peers associated with this session    
+        # Close connection with remote peers associated with this session
         foreach ($client in $this.Clients)
         {
             $client.Close()
@@ -2108,17 +3047,17 @@ class ServerSession {
         Write-Verbose "Wait for associated threads to finish their tasks..."
 
         while ($true)
-        {                
-            $completed = $true                   
-            
+        {
+            $completed = $true
+
             foreach ($worker in $this.WorkerThreads)
             {
                 if (-not $worker.AsyncResult.IsCompleted)
                 {
                     $completed = $false
-                    
+
                     break
-                }                 
+                }
             }
 
             if ($completed)
@@ -2133,26 +3072,28 @@ class ServerSession {
         foreach ($worker in $this.WorkerThreads)
         {
             $null = $worker.PowerShell.EndInvoke($worker.AsyncResult)
-            $worker.PowerShell.Runspace.Dispose()                                      
-            $worker.PowerShell.Dispose()                    
-        }    
-        $this.WorkerThreads.Clear() 
+            $worker.PowerShell.Runspace.Dispose()
+            $worker.PowerShell.Dispose()
+        }
+        $this.WorkerThreads.Clear()
 
-        Write-Host "Session terminated with viewer: $($this.ViewerLocation)" 
+        Write-Host "Session terminated with viewer: $($this.ViewerLocation)"
 
         Write-Verbose "Session closed."
     }
 }
 
-class SessionManager {    
+# -------------------------------------------------------------------------------
+
+class SessionManager {
     [ServerIO] $Server = $null
 
     [System.Collections.Generic.List[ServerSession]]
-    $Sessions = @()        
+    $Sessions = @()
 
-    [SecureString] $SecurePassword = $null 
+    [SecureString] $SecurePassword = $null
 
-    [System.Security.Cryptography.X509Certificates.X509Certificate2] 
+    [System.Security.Cryptography.X509Certificates.X509Certificate2]
     $Certificate = $null
 
     [bool] $ViewOnly = $false
@@ -2163,7 +3104,7 @@ class SessionManager {
     SessionManager(
         [SecureString] $SecurePassword,
 
-        [System.Security.Cryptography.X509Certificates.X509Certificate2] 
+        [System.Security.Cryptography.X509Certificates.X509Certificate2]
         $Certificate,
 
         [bool] $ViewOnly,
@@ -2173,7 +3114,7 @@ class SessionManager {
     {
         Write-Verbose "Initialize new session manager..."
 
-        $this.SecurePassword = $SecurePassword        
+        $this.SecurePassword = $SecurePassword
         $this.ViewOnly = $ViewOnly
         $this.UseTLSv13 = $UseTLSv13
         $this.Clipboard = $Clipboard
@@ -2198,9 +3139,9 @@ class SessionManager {
 
     [void] OpenServer(
         [string] $ListenAddress,
-        [int] $ListenPort        
+        [int] $ListenPort
     )
-    {    
+    {
         <#
             .SYNOPSIS
                 Create a new server object then start listening on desired interface / port.
@@ -2214,7 +3155,7 @@ class SessionManager {
                 TCP Port to listen for new peers (0-65535)
         #>
 
-        $this.CloseServer()        
+        $this.CloseServer()
         try
         {
             $this.Server = [ServerIO]::New()
@@ -2254,7 +3195,7 @@ class SessionManager {
     }
 
     [void] ProceedNewSessionRequest([ClientIO] $Client)
-    {        
+    {
         <#
             .SYNOPSIS
                 Attempt a new session request with remote peer.
@@ -2263,17 +3204,17 @@ class SessionManager {
                 Session creation is now requested from a dedicated client instead of using
                 same client as for desktop streaming.
 
-                I prefer to use a dedicated client to have a more cleaner session establishement 
+                I prefer to use a dedicated client to have a more cleaner session establishement
                 process.
 
-                Session request will basically generate a new session object, send some information 
+                Session request will basically generate a new session object, send some information
                 about current server marchine state then wait for viewer acknowledgement with desired
                 configuration (Ex: desired screen to capture, quality and local size constraints).
 
-                When session creation is done, client is then closed.                                
+                When session creation is done, client is then closed.
         #>
         try
-        {                           
+        {
             Write-Verbose "Remote peer as requested a new session..."
 
             $session = [ServerSession]::New(
@@ -2283,10 +3224,10 @@ class SessionManager {
             )
 
             Write-Verbose "@ServerSession"
-            Write-Verbose "Id: ""$($session.Id)"""            
+            Write-Verbose "Id: ""$($session.Id)"""
             Write-Verbose "---"
 
-            $serverInformation = New-Object PSCustomObject -Property @{    
+            $serverInformation = New-Object PSCustomObject -Property @{
                 # Session information and configuration
                 SessionId = $session.Id
                 Version = $global:ArcaneProtocolVersion
@@ -2296,8 +3237,8 @@ class SessionManager {
                 # Local machine information
                 MachineName = [Environment]::MachineName
                 Username = [Environment]::UserName
-                WindowsVersion = [Environment]::OSVersion.VersionString                
-            }            
+                WindowsVersion = [Environment]::OSVersion.VersionString
+            }
 
             Write-Verbose "Sending server information to remote peer..."
 
@@ -2309,8 +3250,8 @@ class SessionManager {
 
             Write-Verbose "New session successfully created."
 
-            $this.Sessions.Add($session)    
-            
+            $this.Sessions.Add($session)
+
             $client.WriteLine(([ProtocolCommand]::Success))
         }
         catch
@@ -2326,13 +3267,13 @@ class SessionManager {
                 $client.Close()
             }
         }
-    }   
+    }
 
     [void] ProceedAttachRequest([ClientIO] $Client)
-    {    
+    {
         <#
             .SYNOPSIS
-                Attach a new peer to an existing session then dispatch this new peer as a 
+                Attach a new peer to an existing session then dispatch this new peer as a
                 new stateful worker.
 
             .PARAMETER Client
@@ -2350,50 +3291,50 @@ class SessionManager {
 
         Write-Verbose "Client successfully attached to session: ""$($session.id)"""
 
-        $Client.WriteLine(([ProtocolCommand]::ResourceFound))        
+        $Client.WriteLine(([ProtocolCommand]::ResourceFound))
 
-        $workerKind = $Client.ReadLine(5 * 1000)        
+        $workerKind = $Client.ReadLine(5 * 1000)
 
         switch ([WorkerKind] $workerKind)
         {
             (([WorkerKind]::Desktop))
-            {            
+            {
                 $session.NewDesktopWorker($Client)
 
                 break
             }
 
             (([WorkerKind]::Events))
-            {                            
+            {
                 $session.NewEventWorker($Client) # I/O
 
                 break
-            }            
+            }
         }
     }
-    
+
     [void] ListenForWorkers()
-    {            
+    {
         <#
             .SYNOPSIS
                 Process server client queue and dispatch accordingly.
-        #>   
+        #>
         while ($true)
-        {          
+        {
             if (-not $this.Server -or -not $this.Server.Active())
             {
                 throw "A server must be active to listen for new workers."
             }
 
             try
-            {                
+            {
                 $this.CheckSessionsIntegrity()
             }
             catch
             {  }
 
             $client = $null
-            try 
+            try
             {
                 $client = $this.Server.PullClient(
                     $this.SecurePassword,
@@ -2407,12 +3348,12 @@ class SessionManager {
                 switch ([ProtocolCommand] $requestMode)
                 {
                     ([ProtocolCommand]::RequestSession)
-                    {                        
+                    {
                         $remoteAddress = $client.RemoteAddress()
 
                         $this.ProceedNewSessionRequest($client)
 
-                        Write-Host "New remote desktop session established with: $($remoteAddress)" 
+                        Write-Host "New remote desktop session established with: $($remoteAddress)"
 
                         break
                     }
@@ -2430,9 +3371,9 @@ class SessionManager {
 
                         throw "Bad request."
                     }
-                }                
+                }
             }
-            catch 
+            catch
             {
                 if ($client)
                 {
@@ -2468,7 +3409,7 @@ class SessionManager {
 
         foreach ($session in $this.Sessions)
         {
-            $session.Close()            
+            $session.Close()
         }
 
         $this.Sessions.Clear()
@@ -2484,28 +3425,15 @@ class SessionManager {
         $this.CloseSessions()
 
         if ($this.Server)
-        {            
+        {
             $this.Server.Close()
 
-            $this.Server = $null            
+            $this.Server = $null
         }
     }
 }
 
-function Test-Administrator
-{
-    <#
-        .SYNOPSIS
-            Check if current user is administrator.
-    #>
-    $windowsPrincipal = New-Object Security.Principal.WindowsPrincipal(
-        [Security.Principal.WindowsIdentity]::GetCurrent()
-    )
-    
-    return $windowsPrincipal.IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator
-    )    
-}
+# -------------------------------------------------------------------------------
 
 class ValidateFileAttribute : System.Management.Automation.ValidateArgumentsAttribute
 {
@@ -2519,9 +3447,11 @@ class ValidateFileAttribute : System.Management.Automation.ValidateArgumentsAttr
         if(-not (Test-Path -Path $arguments))
         {
             throw [System.IO.FileNotFoundException]::new()
-        }      
+        }
     }
 }
+
+# -------------------------------------------------------------------------------
 
 class ValidateBase64StringAttribute : System.Management.Automation.ValidateArgumentsAttribute
 {
@@ -2536,6 +3466,16 @@ class ValidateBase64StringAttribute : System.Management.Automation.ValidateArgum
     }
 }
 
+# ----------------------------------------------------------------------------- #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+#  Arcane Entry Point                                                           #
+#                                                                               #
+#                                                                               #
+#                                                                               #
+# ----------------------------------------------------------------------------- #
+
 function Invoke-ArcaneServer
 {
     <#
@@ -2543,15 +3483,15 @@ function Invoke-ArcaneServer
             Create and start a new Arcane Server.
 
         .DESCRIPTION
-            Notices: 
-            
+            Notices:
+
                 1- Prefer using SecurePassword over plain-text password even if a plain-text password is getting converted to SecureString anyway.
 
-                2- Not specifying a custom certificate using CertificateFile or EncodedCertificate result in generating a default 
+                2- Not specifying a custom certificate using CertificateFile or EncodedCertificate result in generating a default
                 self-signed certificate (if not already generated) that will get installed on local machine thus requiring administrator privilege.
                 If you want to run the server as a non-privileged account, specify your own certificate location.
 
-                3- If you don't specify a SecurePassword or Password, a random complex password will be generated and displayed on terminal 
+                3- If you don't specify a SecurePassword or Password, a random complex password will be generated and displayed on terminal
                 (this password is temporary)
 
         .PARAMETER ListenAddress
@@ -2578,11 +3518,11 @@ function Invoke-ArcaneServer
             Type: String
             Default: None
             Description: A file containing valid certificate information (x509), must include the private key.
-            
+
         .PARAMETER EncodedCertificate
             Type: String (Base64 Encoded)
             Default: None
-            Description: A base64 representation of the whole certificate file, must include the private key.            
+            Description: A base64 representation of the whole certificate file, must include the private key.
 
         .PARAMETER UseTLSv1_3
             Type: Switch
@@ -2592,12 +3532,12 @@ function Invoke-ArcaneServer
         .PARAMETER DisableVerbosity
             Type: Switch
             Default: False
-            Description: If present, program wont show verbosity messages.       
+            Description: If present, program wont show verbosity messages.
 
         .PARAMETER Clipboard
             Type: Enum
             Default: Both
-            Description: 
+            Description:
                 Define clipboard synchronization mode (Both, Disabled, Send, Receive) see bellow for more detail.
 
                 * Disabled -> Clipboard synchronization is disabled in both side
@@ -2626,25 +3566,25 @@ function Invoke-ArcaneServer
     #>
 
     param (
-        [string] $ListenAddress = "0.0.0.0", 
+        [string] $ListenAddress = "0.0.0.0",
 
         [ValidateRange(0, 65535)]
-        [int] $ListenPort = 2801,   
+        [int] $ListenPort = 2801,
 
         [SecureString] $SecurePassword = $null,
-        [string] $Password = "",           
-        [String] $CertificateFile = $null,           
+        [string] $Password = "",
+        [String] $CertificateFile = $null,
         [string] $EncodedCertificate = "",
-        [switch] $UseTLSv1_3,        
+        [switch] $UseTLSv1_3,
         [switch] $DisableVerbosity,
         [ClipboardMode] $Clipboard = [ClipboardMode]::Both,
         [switch] $ViewOnly,
         [switch] $PreventComputerToSleep,
         [SecureString] $CertificatePassword = $null
-    )    
+    )
 
     $oldErrorActionPreference = $ErrorActionPreference
-    $oldVerbosePreference = $VerbosePreference    
+    $oldVerbosePreference = $VerbosePreference
     try
     {
         $ErrorActionPreference = "stop"
@@ -2653,14 +3593,24 @@ function Invoke-ArcaneServer
         {
             $VerbosePreference = "continue"
         }
-        else 
+        else
         {
             $VerbosePreference = "SilentlyContinue"
         }
 
-        Write-Banner    
+        Write-Banner
 
-        $null = [User32]::SetProcessDPIAware()
+        if ((Test-WinAPI -LibraryName "Shcore.dll" -ApiName "SetProcessDpiAwareness"))
+        {
+            # Windows >= 8.1
+            $PROCESS_PER_MONITOR_DPI_AWARE = 2
+            $null = [Shcore]::SetProcessDpiAwareness($PROCESS_PER_MONITOR_DPI_AWARE)
+        }
+        elseif ((Test-WinAPI -LibraryName "User32.dll" -ApiName "SetProcessDPIAware"))
+        {
+            # Windows >= Vista
+            $null = [User32]::SetProcessDPIAware()
+        }
 
         $Certificate = $null
 
@@ -2687,7 +3637,7 @@ function Invoke-ArcaneServer
             {
                 $message =  "Could not open provided x509 Certificate. Possible Reasons:`r`n" +
                             "* Provided certificate is not a valid x509 Certificate.`r`n" +
-                            "* Certificate is corrupted.`r`n"                        
+                            "* Certificate is corrupted.`r`n"
 
                 if (-not $CertificatePassword)
                 {
@@ -2695,9 +3645,9 @@ function Invoke-ArcaneServer
                 }
                 else
                 {
-                    $message += "* Provided certificate password is not valid.`r`n"     
-                }    
-                
+                    $message += "* Provided certificate password is not valid.`r`n"
+                }
+
                 $message += "More detail: $($_)"
 
                 throw $message
@@ -2712,18 +3662,18 @@ function Invoke-ArcaneServer
         # If plain-text password is set, we convert this password to a secured representation.
         if ($Password -and -not $SecurePassword)
         {
-            $SecurePassword = (ConvertTo-SecureString -String $Password -AsPlainText -Force)            
+            $SecurePassword = (ConvertTo-SecureString -String $Password -AsPlainText -Force)
         }
 
         if (-not $SecurePassword)
         {
             $SecurePassword = New-RandomPassword
-            
+
             Write-Host -NoNewLine "Server password: """
             Write-Host -NoNewLine $(Get-PlainTextPassword -SecurePassword $SecurePassword) -ForegroundColor green
-            Write-Host """." 
-        } 
-        else 
+            Write-Host """."
+        }
+        else
         {
             if (-not (Test-PasswordComplexity -SecurePasswordCandidate $SecurePassword))
             {
@@ -2733,13 +3683,13 @@ function Invoke-ArcaneServer
                 * At least of lower case character`r`n`
                 * At least of upper case character`r`n"
             }
-        }   
-        
+        }
+
         Remove-Variable -Name "Password" -ErrorAction SilentlyContinue
 
         try
         {
-            $oldExecutionStateFlags = $null            
+            $oldExecutionStateFlags = $null
             if ($PreventComputerToSleep)
             {
                 $oldExecutionStateFlags = Invoke-PreventSleepMode
@@ -2756,24 +3706,24 @@ function Invoke-ArcaneServer
                 $UseTLSv1_3,
                 $Clipboard
             )
-            
+
             $sessionManager.OpenServer(
                 $ListenAddress,
                 $ListenPort
             )
 
             Write-Host "Server is ready to receive new connections..."
-        
-            $sessionManager.ListenForWorkers()            
+
+            $sessionManager.ListenForWorkers()
         }
         finally
         {
             if ($sessionManager)
-            {            
+            {
                 $sessionManager.CloseServer()
 
                 $sessionManager = $null
-            }  
+            }
 
             if ($oldExecutionStateFlags)
             {
@@ -2781,15 +3731,17 @@ function Invoke-ArcaneServer
             }
 
             Write-Host "Remote desktop was closed."
-        }                                                  
+        }
     }
     finally
-    {            
+    {
         $ErrorActionPreference = $oldErrorActionPreference
         $VerbosePreference = $oldVerbosePreference
     }
 }
 
-try {  
+# -------------------------------------------------------------------------------
+
+try {
     Export-ModuleMember -Function Invoke-ArcaneServer
 } catch {}
