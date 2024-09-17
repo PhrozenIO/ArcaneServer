@@ -70,9 +70,10 @@ A new PowerShell command prompt should open with SYSTEM privileges. You can veri
 
 ## Version Table
 
-| Version         | Protocol Version | Release Date    | 
-|-----------------|------------------|-----------------|
-| 1.0.4           | 5.0.1            | 15 August 2024  | 
+| Version         | Protocol Version | Release Date      | 
+|-----------------|------------------|-------------------|
+| 1.0.4           | 5.0.1            | 15 August 2024    | 
+| 1.0.5           | 5.0.2            | 17 September 2024 |
 
 ## Advanced Usage
 
@@ -160,4 +161,20 @@ You can then pass the output base64 certificate file to parameter `EncodedCertif
 
 ## Changelog
 
+## Version 1.0.5
 
+- [x] **Dynamic Resolution/Scaling Update Support:** When the remote display resolution or HDPI scaling settings change, the viewer is notified and automatically updates the current window to accommodate the new display constraints.
+- [x] **Secure Desktop (Automatic Desktop Context Switching)** is now fully supported for both Desktop Streaming and Input (Keyboard, Mouse, Outgoing Clipboard). To capture Secure Desktop, Arcane Server must be run as an Interactive `SYSTEM` user. You can use `PsExec` or `PowerRunAsSystem` to achieve this. This feature is crucial for logging into a remote user account when the session is locked or for accepting or rejecting UAC prompts.
+- [x] **Keyboard Simulation Enhancement:** Keyboard simulation has been improved by moving from .NET to the pure Windows API `SendInput` for simulating both individual key inputs and shortcuts. This transition offers several advantages: it supports a broader range of applications and windows (all) and it simplifies the detection and switching of Secure Desktop updates.
+- [x] **New Shortcuts Supported:** Arcane now supports additional keyboard shortcuts, including `CTRL+[A-Z]` and `ALT+[F1-F16]`. The Windows key (Meta Key) is also supported. The shortcut for locking the workstation, `WIN + L`, has been added.
+- [x] **Optimizations and Enhancements:** This update includes multiple optimizations, cleaner code, and improved presentation mode handling. In presentation mode (view only), event threads are no longer required for both the viewer and the server.
+
+## Special Thanks
+
+* [Mudpak (Mudsor MASOOD)](https://www.linkedin.com/in/mudsormasood/) - Official Beta / Quality Tester
+
+Additionally, I extend my gratitude to those who contributed to enhancing the project's visibility:
+
+* [Laurent Minne](https://www.linkedin.com/in/laurent-minne/)
+
+*If you share Arcane with your community, please feel free to contact me to be recognized in this section. I am very grateful to those who contribute by sharing my research and projects.*
