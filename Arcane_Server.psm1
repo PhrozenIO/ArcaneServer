@@ -155,6 +155,10 @@ Add-Type @"
             uint dwDesiredAccess
         );
 
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool LockWorkStation();
+
         [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern IntPtr OpenDesktop(
             string lpszDesktop,
@@ -189,7 +193,12 @@ Add-Type @"
         );
 
         [DllImport("user32.dll", SetLastError = true)]
-        public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+        [return: MarshalAs(UnmanagedType.U4)]
+        public static extern uint SendInput(
+            uint nInputs,
+            IntPtr pInputs,
+            int cbSize
+        );
     }
 
     public static class Kernel32
@@ -1288,6 +1297,344 @@ $global:HandleInputEvent_ScriptBlock = {
         );
     }
 
+    function Get-SpecialVirtualKey
+    {
+        <#
+            .SYNOPSIS
+                Get the Virtual Key Code for the specified special key.
+
+            .PARAMETER Key
+                The special key token to get the Virtual Key Code for.
+        #>
+        param (
+            [string]$Key
+        )
+
+        if ($Key.StartsWith("{") -and $Key.EndsWith("}"))
+        {
+            $Key = $Key.Substring(1, $Key.Length - 2)
+        }
+
+        $map = @{
+            "BACKSPACE"   = 0x08
+            "BS"          = 0x08
+            "BKSP"        = 0x08
+            "BREAK"       = 0x03
+            "CAPSLOCK"    = 0x14
+            "DELETE"      = 0x2E
+            "DEL"         = 0x2E
+            "DOWN"        = 0x28
+            "END"         = 0x23
+            "ENTER"       = 0x0D
+            "~"           = 0x0D
+            "ESC"         = 0x1B
+            "HELP"        = 0x2F
+            "HOME"        = 0x24
+            "INSERT"      = 0x2D
+            "INS"         = 0x2D
+            "LEFT"        = 0x25
+            "NUMLOCK"     = 0x90
+            "PGDN"        = 0x22
+            "PGUP"        = 0x21
+            "PRTSC"       = 0x2C
+            "RIGHT"       = 0x27
+            "SCROLLLOCK"  = 0x91
+            "TAB"         = 0x09
+            "UP"          = 0x26
+            "F1"          = 0x70
+            "F2"          = 0x71
+            "F3"          = 0x72
+            "F4"          = 0x73
+            "F5"          = 0x74
+            "F6"          = 0x75
+            "F7"          = 0x76
+            "F8"          = 0x77
+            "F9"          = 0x78
+            "F10"         = 0x79
+            "F11"         = 0x7A
+            "F12"         = 0x7B
+            "F13"         = 0x7C
+            "F14"         = 0x7D
+            "F15"         = 0x7E
+            "F16"         = 0x7F
+
+            # Modifier Keys
+            "+"           = 0x10  # SHIFT
+            "^"           = 0x11  # CTRL
+            "%"           = 0x12  # ALT
+            "!"           = 0x5B  # WIN
+        }
+
+        if ($map.ContainsKey($Key))
+        {
+            return $map[$Key]
+        }
+        else
+        {
+            return $null
+        }
+    }
+
+    function Edit-InputStruct
+    {
+        <#
+            .SYNOPSIS
+                Edit the INPUT struct at the specified index in the INPUT[] array (In Memory).
+
+            .PARAMETER Char
+                The character to simulate.
+
+            .PARAMETER InputArray
+                The pointer to the INPUT[] array.
+
+            .PARAMETER Index
+                The index of the INPUT struct to edit.
+
+            .PARAMETER KeyUp
+                If the key should be released.
+
+            .PARAMETER Reset
+                If the INPUT struct should be reset (ZeroMemory).
+
+            .PARAMETER ForceVK
+                If the Virtual Key Code should be forced.
+        #>
+        param(
+            [parameter(Mandatory = $true)]
+            [string]$Char,
+
+            [parameter(Mandatory = $true)]
+            [IntPtr]$InputArray,
+
+            [parameter(Mandatory = $true)]
+            [int]$Index,
+
+            [bool]$KeyUp = $false,
+            [bool]$Reset = $false,
+            [bool]$ForceVK = $false
+        )
+
+        if ($InputArray -eq [IntPtr]::Zero)
+        {
+            return
+        }
+
+        # ------------------------------------------------------------------------#
+        # Field      | Type      | Size x32 | Offset x32 | Size x64 | Offset x64  #
+        # ------------------------------------------------------------------------#
+        # INPUT                                                                   #
+        # ------------------------------------------------------------------------#
+        # type       | DWORD     | 0x4       | 0x0       | 0x4      | 0x0         #
+        # ------------------------------------------------------------------------#
+        # KEYBDINPUT (UNION) - INPUT.ki                                           #
+        # Largest Union is MOUSEINPUT (x32 = 24 Bytes, x64 = 32 Bytes)            #
+        # ------------------------------------------------------------------------#
+        # wVk        | WORD      | 0x2       | 0x4       | 0x2      | 0x8         #
+        # wScan      | WORD      | 0x2       | 0x6       | 0x2      | 0xA         #
+        # dwFlags    | DWORD     | 0x4       | 0x8       | 0x4      | 0xC         #
+        # time       | DWORD     | 0x4       | 0xC       | 0x4      | 0x10        #
+        # dwExtraInfo| ULONG8PTR | 0x4       | 0x10      | 0x8      | 0x18        #
+        # ------------------------------------------------------------------------#
+        # Total Size x32 : 0x1C (28 Bytes)   |   Total Size x64 : 0x28 (40 Bytes) #
+        # ------------------------------------------------------------------------#
+        if ([IntPtr]::Size -eq 0x8)
+        {
+            # x64
+            $structSize =  + 0x28
+
+            $offset_wVk = 0x8
+            $offset_wScan = 0xA
+            $offset_dwFlags = 0xC
+        }
+        else
+        {
+            # x32
+            $structSize = 0x1C
+
+            $offset_wVk = 0x4
+            $offset_wScan = 0x6
+            $offset_dwFlags = 0x8
+        }
+
+        $INPUT_KEYBOARD = 0x1;
+        $KEYEVENTF_UNICODE = 0x4;
+        $KEYEVENTF_KEYUP = 0x2;
+
+        $inputStruct = [IntPtr]::Add($InputArray, ($structSize * $Index))
+
+        if ($Reset)
+        {
+            for ($i = 0; $i -lt $structSize; $i++)
+            {
+                [System.Runtime.InteropServices.Marshal]::WriteByte($inputStruct, $i, 0x0)
+            }
+        }
+
+        $dwFlags = 0x0
+        $wScan = 0x0
+        $wVk = 0x0
+
+        if ($Char.Length -gt 1 -and $Char.StartsWith('{') -and $Char.EndsWith('}'))
+        {
+            $wVk = Get-SpecialVirtualKey -Key $Char
+            if (-not $wVk)
+            {
+                return
+            }
+        }
+        elseif ($Char.Length -eq 1)
+        { 
+            if ($ForceVK)
+            {
+                $wVk = [int][char]$Char
+            }
+            else
+            {
+                $dwFlags = $KEYEVENTF_UNICODE
+                $wScan = [int][char]$Char 
+            }
+        }
+        else
+        {
+            return
+        }
+
+        if ($KeyUp)
+        {
+            $dwFlags = $dwFlags -bor $KEYEVENTF_KEYUP
+        }
+
+        [System.Runtime.InteropServices.Marshal]::WriteInt32($inputStruct, 0x0, $INPUT_KEYBOARD)      # INPUT.type
+
+        [System.Runtime.InteropServices.Marshal]::WriteInt16($inputStruct, $offset_wVk, $wVk)         # INPUT.KEYBDINPUT.wVk
+        [System.Runtime.InteropServices.Marshal]::WriteInt16($inputStruct, $offset_wScan, $wScan)     # INPUT.KEYBDINPUT.wScan
+        [System.Runtime.InteropServices.Marshal]::WriteInt32($inputStruct, $offset_dwFlags, $dwFlags) # INPUT.KEYBDINPUT.dwFlags
+    }
+
+    function Invoke-KeyboardInputSimulator {
+        <#
+            .SYNOPSIS
+                Simulate keyboard input for the specified characters.
+
+            .PARAMETER InputItems
+                The characters to simulate.
+        #>
+        param (
+            [parameter(Mandatory = $true)]
+            [string[]]$InputItems,
+
+            [bool]$IsShortcut = $false
+        )
+
+        if ([IntPtr]::Size -eq 0x8)
+        {
+            $structSize = 0x28
+        }
+        else
+        {
+            $structSize = 0x1C
+        }
+
+        $inputArrayCount = $InputItems.Length * 2
+        $inputArraySize = $structSize * $inputArrayCount
+
+        # Allocate memory for the INPUT[] structs. (SizeOf(INPUT) * InputItems.Length) * 2 (Up and Down INPUT structs)
+        $inputArray = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($inputArraySize)
+        try
+        {
+            # Zero out the memory
+            for ($i = 0; $i -lt $inputArraySize; $i++)
+            {
+                [System.Runtime.InteropServices.Marshal]::WriteByte($inputArray, $i, 0x0)
+            }
+
+            for ($i = 0; $i -lt $InputItems.Length; $i++)
+            {
+                if ($IsShortcut)
+                {
+                    # If the input is a shortcut, we need to send the key down and key up events separately.
+                    $indexDown = $i
+                    $indexUp = $InputItems.Length + $i
+                    $forceVK = $true
+                }
+                else
+                {
+                    # If the input is a normal character, we can send the key down and key up events together.
+                    $indexDown = $i * 2
+                    $indexUp = $indexDown + 1
+                    $forceVK = $false
+                }
+
+                Edit-InputStruct -Char $InputItems[$i] -InputArray $inputArray -Index $indexDown -ForceVK $forceVK
+                Edit-InputStruct -Char $InputItems[$i] -InputArray $inputArray -Index $indexUp -KeyUp $true -ForceVK $forceVK
+            }
+
+            $null = [User32]::SendInput($inputArrayCount, $inputArray, $structSize)
+        }
+        finally
+        {
+            [System.Runtime.InteropServices.Marshal]::FreeHGlobal($inputArray)
+        }
+    }
+
+    function Get-InputKeysFromFormatedString
+    {
+        <#
+            .SYNOPSIS
+                Get the input keys from the formated string with matching pattern.
+
+            .PARAMETER Text
+                The text to get the input keys from.
+
+            .PARAMETER Pattern
+                The pattern to match the input keys.
+        #>
+        param(
+            [parameter(Mandatory = $true)]
+            [string]$Text,
+
+            [parameter(Mandatory = $true)]
+            [string]$Pattern,
+
+            [parameter(Mandatory = $true)]
+            [char]$EscapeChar
+
+        )
+
+        $m = [regex]::matches($Text, $pattern)
+
+        return @($m | ForEach-Object { 
+            # If we match `EscapeChar` (escaped), we replace with a single `EscapeChar`
+            if ($_.Value -eq [string]::new($EscapeChar, 2)) {
+                return $EscapeChar
+            }
+            return $_.Value
+        })
+    }
+
+    function Invoke-KeyboardWriteText {
+        <#
+            .SYNOPSIS
+                Simulate keyboard input for the specified text (Support Special Characters).
+
+            .PARAMETER Text
+                The text to simulate.
+
+            .PARAMETER IsShortcut
+                If the input text must be treated as a shortcut.
+        #>
+        param (
+            [parameter(Mandatory = $true)]
+            [string]$Text,
+
+            [bool]$IsShortcut = $false
+
+        )
+
+        $inputItems = Get-InputKeysFromFormatedString -Text $Text -Pattern '(\{\{)|(\{[^}]*\})|.' -EscapeChar '{'
+
+        Invoke-KeyboardInputSimulator -InputItems $inputItems -IsShortcut $IsShortcut
+    }
     function Invoke-SetClipboardData {
         <#
             .SYNOPSIS
@@ -1348,16 +1695,31 @@ $global:HandleInputEvent_ScriptBlock = {
                     if (-not ($aEvent.PSobject.Properties.name -match "Keys"))
                     { break }
 
-                    if ($aEvent.Keys -eq "^{ESC}")
+                    if ($aEvent.PSobject.Properties.name -match "IsShortcut")
                     {
-                        # When running as interactive SYSTEM process, `^{ESC}` is not working from `SendWait` method
-                        # Instead we rely on `keybd_event` method to simulate the key combination
-                        [User32]::keybd_event($VK_LWIN, 0, $KEYEVENTF_KEYDOWN, [UIntPtr]::Zero)
-                        [User32]::keybd_event($VK_LWIN, 0, $KEYEVENTF_KEYUP, [UIntPtr]::Zero)
+                        $isShortcut = $aEvent.IsShortcut
                     }
                     else
                     {
-                        [System.Windows.Forms.SendKeys]::SendWait($aEvent.Keys)
+                        $isShortcut = $false
+                    }
+                    
+                    switch ($aEvent.Keys)
+                    {
+                        # Special Actions (e.g., Lock Workstation)
+                        "{LOCKWORKSTATION}"
+                        {
+                            [User32]::LockWorkStation()
+
+                            break
+                        }
+
+                        default
+                        {
+                            Invoke-KeyboardWriteText -Text $aEvent.Keys -IsShortcut $isShortcut
+
+                            break
+                        }
                     }
 
                     break
@@ -2733,18 +3095,9 @@ class ServerSession {
 
         ###
 
-        if ($this.LogonUIAccess)
-        {
-            $runspaceApartmentState = "MTA"
-        }
-        else
-        {
-            $runspaceApartmentState = "STA"
-        }
-
         $this.WorkerThreads.Add(
             (
-                New-RunSpace -RunspaceApartmentState $runspaceApartmentState -ScriptBlocks @(
+                New-RunSpace -ScriptBlocks @(
                     # Runspace Required Functions
                     $global:WinAPI_Const_ScriptBlock,
                     $global:WinAPIException_Class_ScriptBlock,
