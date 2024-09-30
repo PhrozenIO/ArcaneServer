@@ -85,8 +85,8 @@ Invoke-ArcaneServer
  
 | Parameter              | Type             | Default    | Description  |
 |------------------------|------------------|------------|--------------|
-| ServerAddress          | String           | 0.0.0.0    | IP address representing the local machine's IP address |
-| ServerPort             | Integer          | 2801       | The port number on which to listen for incoming connections |
+| ListenAddress          | String           | 0.0.0.0    | IP address representing the local machine's IP address |
+| ListenPort             | Integer          | 2801       | The port number on which to listen for incoming connections |
 | SecurePassword         | SecureString     | None       | SecureString object containing the password used for authenticating remote viewers (recommended) |
 | Password               | String           | None       | Plain-text password used for authenticating remote viewers (not recommended; use SecurePassword instead) |
 | DisableVerbosity       | Switch           | False      | If specified, the program will suppress verbosity messages |
